@@ -1,5 +1,7 @@
 import logging
 from pathlib import Path
+import typing
+from typing import List, Set, Dict, Tuple, Optional
 
 import requests
 import xmltodict
@@ -10,8 +12,9 @@ import numpy as np
 import rasterio as rio
 from rasterio.mask import mask
 from osgeo import gdal
-import pygeoprocessing
 import geopandas as gpd
+
+import pygeoprocessing
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -22,46 +25,73 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
 
+pathlike = str | Path
 
-def extract_cdl(year, fips, temp_dir):
+# typing package for type hinting in functions
+
+
+def extract_cdl(
+    year: int, fips: int, temp_dir: pathlike, nodata_val: int | float = 0
+) -> Path:
     """Extract CDL data for a given year and FIPS code
 
     Args:
         year (int): year to extract
         fips (int): FIPS code to extract
-        temp_dir (pathlib.Path): temporary directory to store data
+        temp_dir (str or pathlib.Path): temporary directory to store data
 
     Returns:
         pathlib.Path: path to extracted CDL data
     """
+
     logger.info(f"Extracting CDL data for {year} in FIPS {fips}")
+
     # Get CDL data from NASS as XML link
     nass_xml_url = rf"https://nassgeodata.gmu.edu/axis2/services/CDLService/GetCDLFile?year={year}&fips={fips}"
     r = requests.get(nass_xml_url)
+
     # Extract XML link from XML
     nass_data_url = xmltodict.parse(r.content)["ns1:GetCDLFileResponse"]["returnURL"]
-    # Download CDL data
+
+    # Download CDL data to local file
     r = requests.get(nass_data_url, allow_redirects=True)
     outfile = temp_dir / f"CDL_{year}_{fips}.tif"
     with open(outfile, "wb") as cdl_out:
         cdl_out.write(r.content)
 
+    # Update nodata value to 0
+    with rio.open(outfile, "r+") as dataset:
+        dataset.nodata = nodata_val
+
     return outfile
 
 
 def copy_raster_to_new_datatype(
-    raster_path, output_raster_path, rasterio_dtype=rio.int16
+    raster_path: pathlike,
+    output_raster_path: pathlike,
+    rasterio_dtype: str = rio.int16,
+    nodata_val: Optional[int | float] = None,
 ):
     """A function to copy a raster to a new datatype
 
     Args:
-        raster_path (pathlib.Path): Path to the input raster
+        raster_path (str or pathlib.Path): Path to the input raster
         output_raster_path (pathlib.Path): Path to the output raster
     """
+    # Force pathlib compliance
+    raster_path = Path(raster_path)
+    output_raster_path = Path(output_raster_path)
+
     src = rio.open(raster_path)
     src_array = src.read(1)
     profile = src.profile
-    profile.update(dtype=rasterio_dtype, count=1, compress="lzw")
+
+    # Update profile. If nodata_val is not None, set nodata value to nodata_val
+    if nodata_val is not None:
+        profile.update(dtype=rasterio_dtype, count=1, compress="lzw", nodata=nodata_val)
+    else:
+        profile.update(dtype=rasterio_dtype, count=1, compress="lzw")
+
     with rio.open(output_raster_path, "w", **profile) as dst:
         dst.write(src_array.astype(rasterio_dtype), 1)
 
@@ -78,7 +108,7 @@ def batch_masked_zonal_stats(
         "sum",
         "mean",
     ],
-):
+) -> Tuple[List[pd.DataFrame], Path]:
     """A function to calculate masked zonal statistics for a list of rasters
 
     Args:
@@ -89,8 +119,8 @@ def batch_masked_zonal_stats(
         zonal_join_columns (list, optional): _description_. Defaults to [ "count", "nodata_count", "sum", "mean", ].
 
     Returns:
-        _type_: _description_
-        _type_: _description_
+        List[pd.DataFrame]: _description_
+        Path: _description_
     """
     zonal_stats_list = []
     aligned_mask_raster_path = temp_workspace_dir / f"{mask_raster_path.stem}.tif"
@@ -179,7 +209,7 @@ def masked_zonal_stats(
     return zonal_stats_df
 
 
-def rename_invest_results(invest_model, invest_info, suffix):
+def rename_invest_results(invest_model, invest_args, suffix):
     """Rename InVEST results to include the suffix.
 
     Args:
@@ -189,36 +219,35 @@ def rename_invest_results(invest_model, invest_info, suffix):
     """
 
     # Modify relevant outputs
+    # TODO Change pollination results to be dependent on pollinator species
     if invest_model == "pollination":
-        result_file_list = [
-            Path(invest_info["args"]["workspace_dir"]) / f"avg_pol_abd.tif"
-        ]
+        result_file_list = [Path(invest_args["workspace_dir"]) / f"avg_pol_abd.tif"]
     elif invest_model == "pollination_mv":
         result_file_list = [
-            Path(invest_info["args"]["workspace_dir"]) / f"marginal_value_general.tif"
+            Path(invest_args["workspace_dir"]) / f"marginal_value_general.tif"
         ]
     elif invest_model == "sdr":
         result_file_list = [
-            Path(invest_info["args"]["workspace_dir"]) / f"sed_export.tif",
-            Path(invest_info["args"]["workspace_dir"]) / f"watershed_results_sdr.shp",
+            Path(invest_args["workspace_dir"]) / f"sed_export.tif",
+            Path(invest_args["workspace_dir"]) / f"watershed_results_sdr.shp",
         ]
     elif invest_model == "ndr":
         result_file_list = [
-            Path(invest_info["args"]["workspace_dir"]) / f"n_total_export.tif",
-            Path(invest_info["args"]["workspace_dir"]) / f"p_surface_export.tif",
-            Path(invest_info["args"]["workspace_dir"]) / f"watershed_results_ndr.gpkg",
+            Path(invest_args["workspace_dir"]) / f"n_total_export.tif",
+            Path(invest_args["workspace_dir"]) / f"p_surface_export.tif",
+            Path(invest_args["workspace_dir"]) / f"watershed_results_ndr.gpkg",
         ]
     elif invest_model == "carbon":
         result_file_list = [
-            Path(invest_info["args"]["workspace_dir"]) / f"tot_c_cur.tif",
-            Path(invest_info["args"]["workspace_dir"]) / f"tot_c_fut.tif",
-            Path(invest_info["args"]["workspace_dir"]) / f"delta_cur_fut.tif",
+            Path(invest_args["workspace_dir"]) / f"tot_c_cur.tif",
+            Path(invest_args["workspace_dir"]) / f"tot_c_fut.tif",
+            Path(invest_args["workspace_dir"]) / f"delta_cur_fut.tif",
         ]
 
     for result_file in result_file_list:
         if result_file.exists():
             result_file.rename(
-                Path(invest_info["args"]["workspace_dir"])
+                Path(invest_args["workspace_dir"])
                 / f"{result_file.stem}_{suffix}{result_file.suffix}"
             )
 
@@ -252,24 +281,91 @@ def clip_raster_by_vector(mask_path, raster_path, outupt_raster_path):
 
 
 def burn_polygon_add(
-    vector_path, raster_path, output_raster_path, burn_value, rasterio_dtype=rio.int16
+    vector_path,
+    base_raster_path,
+    intermediate_workspace_path,
+    target_raster_path,
+    burn_value,
+    rasterio_dtype=rio.int16,
+    **kwargs,
 ):
     """Burns a polygon into a raster by adding a specified value.
 
     Args:
-        vector_path (_type_): _description_
-        raster_path (_type_): _description_
-        output_raster_path (_type_): _description_
-        burn_value (_type_): _description_
+        vector_path (str/pathlib.Path): Path to the vector to be burned.
+        base_raster_path (str/pathlib.Path): Path to the raster to be burned.
+        intermediate_workspace_path (str/pathlib.Path): Path to the intermediate workspace.
+        target_raster_path (str/pathlib.Path): Path to the output raster.
+        burn_value (int): Value to be burned into the raster.
+        rasterio_dtype (rasterio.dtype): Rasterio datatype to use for the output raster.
+        **kwargs: Keyword arguments to pass to `copy_raster_to_new_datatype`. Currently only "nodata_val" does anything.
+
+    Returns:
+        None
     """
-    copy_raster_to_new_datatype(
-        raster_path, output_raster_path, rasterio_dtype=rasterio_dtype
+
+    # Make all path variables Path objects
+    vector_path = Path(vector_path)
+    base_raster_path = Path(base_raster_path)
+    intermediate_workspace_path = Path(intermediate_workspace_path)
+
+    # Dissolve vector to single feature to avoid overlapping polygons
+    logger.info(f"Dissolving burn vector")
+    vector_gdf = gpd.read_file(vector_path)
+    vector_gdf = vector_gdf.dissolve()
+    dissolved_vector_path = (
+        intermediate_workspace_path / f"_dissolved_{vector_path.stem}.gpkg"
     )
+    vector_gdf.to_file(dissolved_vector_path)
+
+    # Copy raster to different datatype to accommodate new integer values
+    intermediate_raster_path = (
+        intermediate_workspace_path / f"_burned_{Path(base_raster_path).stem}.tif"
+    )
+    if "nodata_val" in kwargs:
+        copy_raster_to_new_datatype(
+            base_raster_path,
+            intermediate_raster_path,
+            rasterio_dtype=rasterio_dtype,
+            nodata_val=kwargs["nodata_val"],
+        )
+    else:
+        copy_raster_to_new_datatype(
+            base_raster_path,
+            intermediate_raster_path,
+            rasterio_dtype=rasterio_dtype,
+        )
+
+    # Burn and add vector to raster values
+    logger.info(f"Burning vector into raster")
     pygeoprocessing.rasterize(
-        str(vector_path),
-        str(output_raster_path),
+        str(dissolved_vector_path),
+        str(intermediate_raster_path),
         burn_values=[burn_value],
         option_list=["MERGE_ALG=ADD"],
+    )
+
+    # Remove areas where vector burned over nodata
+    logger.info(f"Removing nodata areas")
+
+    def mask_op(base_array, mask_array, nodata):
+        result = np.copy(base_array)
+        result[mask_array == nodata] = nodata
+        return result
+
+    base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
+    target_raster_info = pygeoprocessing.get_raster_info(str(intermediate_raster_path))
+
+    pygeoprocessing.raster_calculator(
+        [
+            (str(intermediate_raster_path), 1),
+            (str(base_raster_path), 1),
+            (base_raster_info["nodata"], "raw"),
+        ],
+        mask_op,
+        str(target_raster_path),
+        target_raster_info["datatype"],
+        target_raster_info["nodata"][0],
     )
 
 
@@ -283,6 +379,7 @@ def burn_polygon_add_constrained(
     burn_value,
     target_nodata,
     rasterio_dtype=rio.int16,
+    **kwargs,
 ):
     """Burns a polygon into a raster by adding a specified value, but constrained by
     another boolean raster.
@@ -297,26 +394,41 @@ def burn_polygon_add_constrained(
         burn_value (_type_): _description_
         target_nodata (_type_): _description_
     """
+
     # Make all path variables Path objects
     vector_path = Path(vector_path)
     raster_path = Path(raster_path)
     intermediate_workspace_path = Path(intermediate_workspace_path)
 
     # Dissolve vector to single feature to avoid overlapping polygons
+    logger.info(f"Dissolving burn vector")
     vector_gdf = gpd.read_file(vector_path)
     vector_gdf = vector_gdf.dissolve()
     dissolved_vector_path = (
         intermediate_workspace_path / f"_dissolved_{vector_path.stem}.gpkg"
     )
     vector_gdf.to_file(dissolved_vector_path)
-    # Copy raster to int16 to allow for larger integer values
+
+    # Copy raster to different datatype to accommodate new integer values
     intermediate_raster_path = (
-        Path(intermediate_workspace_path) / f"_solar_{Path(raster_path).stem}.tif"
+        Path(intermediate_workspace_path) / f"_burned_{Path(raster_path).stem}.tif"
     )
-    copy_raster_to_new_datatype(
-        raster_path, intermediate_raster_path, rasterio_dtype=rasterio_dtype
-    )
+    if "nodata_val" in kwargs:
+        copy_raster_to_new_datatype(
+            raster_path,
+            intermediate_raster_path,
+            rasterio_dtype=rasterio_dtype,
+            nodata_val=kwargs["nodata_val"],
+        )
+    else:
+        copy_raster_to_new_datatype(
+            raster_path,
+            intermediate_raster_path,
+            rasterio_dtype=rasterio_dtype,
+        )
+
     # Burn and add vector to raster values
+    logger.info(f"Burning vector into raster")
     pygeoprocessing.rasterize(
         str(dissolved_vector_path),
         str(intermediate_raster_path),
@@ -333,6 +445,7 @@ def burn_polygon_add_constrained(
         return out_array
 
     # Replace values in intermediate raster with original raster values where constrained
+    logger.info(f"Constraining burn by raster")
     pygeoprocessing.raster_calculator(
         [
             (str(raster_path), 1),
