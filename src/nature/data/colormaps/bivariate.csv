@@ -1,0 +1,10 @@
+﻿category,variable_1,variable_2,color
+bad|bad,bad,bad,#b30000
+bad|neutral,bad,neutral,#f35926
+bad|good,bad,good,#ffcc80
+neutral|bad,neutral,bad,#7f7f7f
+neutral|neutral,neutral,neutral,#bfbfbf
+neutral|good,neutral,good,#e6e6e6
+good|bad,good,bad,#240d5e
+good|neutral,good,neutral,#7b67ab
+good|good,good,good,#c3b3d8

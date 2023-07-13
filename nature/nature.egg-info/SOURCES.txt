@@ -1,7 +1,0 @@
-setup.py
-nature/__init__.py
-nature/nature.py
-nature.egg-info/PKG-INFO
-nature.egg-info/SOURCES.txt
-nature.egg-info/dependency_links.txt
-nature.egg-info/top_level.txt

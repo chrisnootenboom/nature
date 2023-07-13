@@ -1,0 +1,27 @@
+[build-system]
+build-backend = 'setuptools.build_meta'
+requires = [
+    'setuptools',
+]
+
+[project]
+name = "nature"
+description = "helper functions for geospatial workflows"
+version = "0.1.0"
+authors = [
+    { name = "Chris Nootenboom", email = "chris@ecognosis.co" }
+]
+dependencies = [
+]
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[tool.setuptools.dynamic]
+readme = "README.md"
+
+[project.urls]
+"Homepage" = "https://github.com/chrisnootenboom/nature"
