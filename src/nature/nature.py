@@ -16,6 +16,7 @@ import pint
 import matplotlib.colors
 
 import rasterio as rio
+from rasterio.merge import merge
 from rasterio.mask import mask
 from osgeo import gdal, osr
 import geopandas as gpd
@@ -38,11 +39,234 @@ logger.setLevel(logging.DEBUG)
 
 pathlike = str | Path
 
-# typing package for type hinting in functions
-
+# TODO create singular logger file that applies via a logging python function (e.g. nature.logging.create_logger(level=logging.DEBUG))
+# TODO this is so we can add collapsable messages for subsections of code (e.g. "message | submessage | subsubmessage")
 
 # TODO Go through and clean up NoData entries, since I would like to internalize that parameter as much as possible.
 # NOTE The main thing is to inherit NoData from the input raster. If changing raster dtype, then check if nodata fits in new dtype.
+
+
+def message(*message_list):
+    # TODO LOGGER STUFF
+    """Format a list of messages for logging.
+
+    Args:
+        *args: Any number of messages to print.
+    """
+    return " | ".join([str(message) for message in message_list])
+
+
+def scenario_labeling(
+    args: dict,
+    baseline_args: list,
+    baseline_scenario_label: str = "baseline",
+):
+    """A function that takes all possible scenario-ized args, organizes them, duplicates baseline args if
+    the scenario args do not exist, then produces a standard dict structure expected by all NCI Marginal Value
+    models.
+
+    Args:
+        args (dict): The args dictionary used as input into the model.
+            Must have an argument called 'scenario_{i}_list' for each baseline arg that is scenario-ized.
+            Must have an argument called 'scenario_labels_list'.
+        baseline_args (list): List of baseline args that become scenarios.
+        scenario_labels_list (str): List of scenario suffixes.
+        baseline_scenario_label (string, optional): String label for baseline results. Defaults to "baseline".
+
+    Returns:
+        list: Scenario names for labeling
+        list: Ordered list of lists of scenario args
+    """
+
+    # First check if there are any scenario args to analyze, else return just the baseline args
+    if any(
+        [
+            f"scenario_{x}_list" in args
+            and args[f"scenario_{x}_list"] is not None
+            and len(args[f"scenario_{x}_list"]) > 0
+            for x in baseline_args
+        ]
+    ):
+        # Ensure all scenario args are in the args dict
+        for baseline_arg in baseline_args:
+            scenario_arg = f"scenario_{baseline_arg}_list"
+            if scenario_arg not in args or args[scenario_arg] is None:
+                args[scenario_arg] = []
+
+        # Used to check if any scenario args contain only one value. If so, we assume this value persists across all scenarios
+        # and duplicate the single scenario arg across all scenarios
+        n_scenarios = max(
+            [
+                len(args[f"scenario_{baseline_arg}_list"])
+                for baseline_arg in baseline_args
+            ]
+        )
+
+        # Identify scenario args and list them under their baseline arg name alongside the initial baseline arg
+        scenario_items_dict = {
+            baseline_arg: [args[baseline_arg]] + args[f"scenario_{baseline_arg}_list"]
+            if len(args[f"scenario_{baseline_arg}_list"]) > 1
+            else [args[baseline_arg]]
+            + args[f"scenario_{baseline_arg}_list"] * n_scenarios
+            for baseline_arg in baseline_args
+        }
+
+        # Duplicate any baseline arg if its corresponding scenario arg list does not exist
+        n_scenarios = max([len(v) for v in scenario_items_dict.values()])
+        scenario_items_dict = {
+            baseline_arg: scenario_items
+            if scenario_items is not None and len(scenario_items) > 1
+            else [args[baseline_arg]] * n_scenarios
+            for baseline_arg, scenario_items in scenario_items_dict.items()
+        }
+
+        # Ensure all scenario arg lists have the same length
+        assert all(
+            len(scenario_items)
+            == len(scenario_items_dict[next(iter(scenario_items_dict))])
+            for scenario_items in scenario_items_dict.values()
+        ), f"All scenario args lists must have the same length. {', '.join([f'({baseline_arg}: {len(scenario_items)-1})' for baseline_arg, scenario_items in scenario_items_dict.items()])}"
+
+        # Ensure baseline_scenario_label isn't in the scenario names
+        assert (
+            baseline_scenario_label not in args["scenario_labels_list"]
+        ), f"Scenarios cannot be labeled '{baseline_scenario_label}'. Please rename the '{baseline_scenario_label}' scenario."
+
+        # Ensure scenario labels exist for all scenario args and if not, relabel them all
+        scenario_name_list = [baseline_scenario_label] + args["scenario_labels_list"]
+        try:
+            len(scenario_name_list) == len(
+                scenario_items_dict[next(iter(scenario_items_dict))]
+            )
+        except:
+            logger.error(
+                f"Must provide the same number of scenario names ({len(scenario_name_list)-1}) as "
+                f"scenario args ({len(scenario_items_dict[next(iter(scenario_items_dict))])-1}). "
+                f"Relabeling as 'scenario1', 'scenario2', etc."
+            )
+            scenario_name_list = [baseline_scenario_label] + [
+                f"scenario{i}"
+                for i in range(
+                    1,
+                    len(scenario_items_dict[next(iter(scenario_items_dict))]),
+                )
+            ]
+
+        # Create labeling schemata
+        scenario_args_dict = {
+            baseline_arg: dict(zip(scenario_name_list, scenario_items))
+            for baseline_arg, scenario_items in scenario_items_dict.items()
+        }
+    else:
+        # Return just the baseline args, but in the same format as the scenario args
+        scenario_name_list = [baseline_scenario_label]
+        scenario_args_dict = {
+            baseline_arg: {baseline_scenario_label: [args[baseline_arg]]}
+            for baseline_arg in baseline_args
+        }
+
+    return scenario_name_list, scenario_args_dict
+
+
+def mosaic_raster(raster_list: list, output_path: pathlike) -> None:
+    """A function to mosaic a list of rasters
+
+    Args:
+        raster_list (list): List of rasters to mosaic
+        output_path (pathlib.Path): Path to output mosaic raster
+
+    Returns:
+        None
+    """
+
+    raster_to_mosaic = []
+    for p in raster_list:
+        raster = rio.open(p)
+        raster_to_mosaic.append(raster)
+    mosaic, output_transform = merge(raster_to_mosaic)
+    output_meta = raster.meta.copy()
+    output_meta.update(
+        {
+            "driver": "GTiff",
+            "height": mosaic.shape[1],
+            "width": mosaic.shape[2],
+            "transform": output_transform,
+        }
+    )
+    with rio.open(output_path, "w", **output_meta) as m:
+        m.write(mosaic)
+
+
+def sjoin_largest_intersection(
+    target_gdf: pathlike, join_gdf: pathlike, join_fields_list: list = None
+):
+    """Spatial join retaining information from the feature with the largest overlap
+
+    Args:
+        target_gdf (gpd.GeoDataFrame): GeoDataFrame to which to join
+        join_gdf (list): GeoDataFrame to join
+        join_fields_list (optional, list): List of fields to join
+
+    Returns:
+        gpd.GeoDataFrame: Copy of target_gdf GeoDataFrame with joined fields
+    """
+
+    logger.debug(f"Spatial join (largest overlap)")
+
+    # Create unique ID field for target layer to sort later
+    target_fid_field = "_join_FID"
+    try:
+        target_fid_field not in target_gdf.columns
+    except:
+        logger.error(f"Field '{target_fid_field}' already exists in target layer")
+
+    # Create unique area field for overlay layer to sort later
+    area_field = "_area"
+    try:
+        area_field not in target_gdf.columns
+    except:
+        logger.error(f"Field '{area_field}' already exists in target layer")
+    try:
+        area_field not in join_gdf.columns
+    except:
+        logger.error(f"Field '{area_field}' already exists in join layer")
+
+    # Identify join fields
+    if join_fields_list is None:
+        join_fields_list = join_gdf.columns.to_list()
+        join_fields_list.remove("geometry")
+
+    # Create copy of target gdf and assign unique index
+    target_copy_gdf = target_gdf.copy()
+    target_copy_gdf[target_fid_field] = target_copy_gdf.index
+
+    # Intersect gdfs and calculate area
+    overlay_gdf = gpd.overlay(target_copy_gdf, join_gdf, how="intersection")
+    overlay_gdf[area_field] = overlay_gdf.geometry.area
+
+    # Sort by area and drop duplicates
+    overlay_gdf.sort_values(by=area_field, inplace=True)
+    overlay_gdf.drop_duplicates(subset=target_fid_field, keep="last", inplace=True)
+    overlay_gdf.drop(columns=[area_field], inplace=True)
+
+    # Subset to join fields and set index
+    overlay_gdf = overlay_gdf[join_fields_list + [target_fid_field]]
+    overlay_gdf.set_index(target_fid_field, inplace=True)
+
+    for join_field in join_fields_list:
+        # Check if join field already exists in target layer
+        target_fields = [field.lower() for field in target_gdf.columns]
+        if join_field.lower() in target_fields:
+            logger.warning(
+                f"Field '{join_field}' may already exist in target layer. Renaming to '{join_field}_'"
+            )
+            # Rename join field to avoid duplicate names
+            overlay_gdf.rename(columns={join_field: f"{join_field}_"}, inplace=True)
+
+    # Join output to target gdf
+    output_gdf = target_gdf.join(overlay_gdf)
+
+    return output_gdf
 
 
 def sjoin_representative_points(
@@ -163,6 +387,24 @@ def distance_to_pixels(
             f"{landcover_mean_pixel_size} as the mean pixel size."
         )
     return landcover_mean_pixel_size
+
+
+def get_mean_pixel_size_and_area(raster_path):
+    raster_info = pygeoprocessing.get_raster_info(str(raster_path))
+    pixel_size_tuple = raster_info["pixel_size"]
+    try:
+        mean_pixel_size, pixel_area = natcap.invest.utils.mean_pixel_size_and_area(
+            pixel_size_tuple
+        )
+    except ValueError:
+        mean_pixel_size = np.min(np.absolute(pixel_size_tuple))
+        logger.debug(
+            "Land Cover Raster has unequal x, y pixel sizes: "
+            f"{pixel_size_tuple}. Using"
+            f"{mean_pixel_size} as the mean pixel size."
+        )
+        pixel_area = mean_pixel_size**2
+    return mean_pixel_size, pixel_area
 
 
 def logistic_decay_kernel_raster(
@@ -301,7 +543,7 @@ def convolve_2d_by_exponential(
     signal_raster_path = Path(signal_raster_path)
     target_convolve_raster_path = Path(target_convolve_raster_path)
 
-    logger.info(
+    logger.debug(
         f"Starting a convolution over {signal_raster_path} with a "
         f"decay distance of {decay_kernel_distance}"
     )
@@ -329,7 +571,7 @@ def convolve_2d_by_logistic(
     terminal_kernel_distance: float,
     decay_start_distance: int | float = 0,
 ):
-    """Convolve signal by an logicstic decay of a given radius and start distance.
+    """Convolve signal by an logistic decay of a given radius and start distance.
 
     Args:
 
@@ -348,7 +590,7 @@ def convolve_2d_by_logistic(
     signal_raster_path = Path(signal_raster_path)
     target_convolve_raster_path = Path(target_convolve_raster_path)
 
-    logger.info(
+    logger.debug(
         f"Starting a logistic convolution over {signal_raster_path} with a "
         f"decay starting at {decay_start_distance} and terminating at {terminal_kernel_distance}"
     )
@@ -448,6 +690,7 @@ def batch_masked_zonal_stats(
         "sum",
         "mean",
     ],
+    zonal_raster_labels=None,
 ) -> Tuple[List[pd.DataFrame], Path]:
     """A function to calculate masked zonal statistics for a list of rasters
 
@@ -457,16 +700,30 @@ def batch_masked_zonal_stats(
         zonal_vector_path (_type_): _description_
         temp_workspace_dir (_type_): _description_
         zonal_join_columns (list, optional): _description_. Defaults to [ "count", "nodata_count", "sum", "mean", ].
+        zonal_raster_labels (list, optional): Optional labels to ascribe to the zonal stats output. Defaults to None.
 
     Returns:
-        List[pd.DataFrame]: _description_
-        Path: _description_
+        List[pd.DataFrame]: List of output zonal statistics dataframes
+        Path: Path to aligned mask raster
     """
+
+    if zonal_raster_labels is not None:
+        assert len(zonal_raster_labels) == len(zonal_raster_list), (
+            f"Length of zonal_raster_labels ({len(zonal_raster_labels)}) must match "
+            f"length of zonal_raster_list ({len(zonal_raster_list)})."
+        )
+
+    # Ensure path arguments are Path objects
+    mask_raster_path = Path(mask_raster_path)
+    zonal_vector_path = Path(zonal_vector_path)
+    temp_workspace_dir = Path(temp_workspace_dir)
+
     zonal_stats_list = []
     aligned_mask_raster_path = temp_workspace_dir / f"{mask_raster_path.stem}.tif"
     for i, raster in enumerate(zonal_raster_list):
-        if i == 0:
-            logger.info(f"Aligning mask with zonal raster {raster}")
+        raster = Path(raster)
+        if i == 0 and not aligned_mask_raster_path.exists():
+            logger.debug(f"Aligning mask with zonal raster {raster}")
             raster_info = pygeoprocessing.get_raster_info(str(raster))
             pygeoprocessing.align_and_resize_raster_stack(
                 [str(raster), str(mask_raster_path)],
@@ -479,7 +736,7 @@ def batch_masked_zonal_stats(
                 "intersection",
                 raster_align_index=0,
             )
-        logger.info(f"Zonal statistics {i+1} of {len(zonal_raster_list)} | {raster}")
+        logger.debug(f"Zonal statistics {i+1} of {len(zonal_raster_list)} | {raster}")
         zonal_stats_df = masked_zonal_stats(
             raster,
             aligned_mask_raster_path,
@@ -489,9 +746,20 @@ def batch_masked_zonal_stats(
         )
 
         zonal_stats_df = zonal_stats_df[zonal_join_columns]
-        zonal_stats_df = zonal_stats_df.rename(
-            columns={col: f"{(raster).stem}__{col}" for col in zonal_join_columns}
-        )
+        # Rename columns to labels if provided, else raster name
+        if zonal_raster_labels is not None:
+            zonal_stats_df = zonal_stats_df.rename(
+                columns={
+                    col: f"{zonal_raster_labels[i]}_masked__{col}"
+                    for col in zonal_join_columns
+                }
+            )
+        else:
+            zonal_stats_df = zonal_stats_df.rename(
+                columns={
+                    col: f"{(raster).stem}_masked__{col}" for col in zonal_join_columns
+                }
+            )
         zonal_stats_list.append(zonal_stats_df)
 
     return zonal_stats_list, aligned_mask_raster_path
@@ -516,6 +784,11 @@ def masked_zonal_stats(
     Returns:
         _type_: _description_
     """
+    # Ensure path arguments are Path objects
+    base_raster_path = Path(base_raster_path)
+    mask_raster_path = Path(mask_raster_path)
+    zonal_vector_path = Path(zonal_vector_path)
+    workspace_dir = Path(workspace_dir)
 
     base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
     base_nodata = base_raster_info["nodata"][0]
@@ -592,13 +865,13 @@ def rename_invest_results(invest_model, invest_args, suffix):
             )
 
 
-def clip_raster_by_vector(mask_path, raster_path, outupt_raster_path):
+def clip_raster_by_vector(mask_path, raster_path, output_raster_path):
     """Clip a raster by a vector mask.
 
     Args:
         mask_path (str): Path to the mask vector.
         raster_path (str): Path to the raster to be clipped.
-        outupt_raster_path (str): Path to the output raster.
+        output_raster_path (str): Path to the output raster.
     """
     mask_gdf = gpd.read_file(mask_path)
 
@@ -616,7 +889,7 @@ def clip_raster_by_vector(mask_path, raster_path, outupt_raster_path):
         }
     )
 
-    with rio.open(outupt_raster_path, "w", **out_meta) as dst:
+    with rio.open(output_raster_path, "w", **out_meta) as dst:
         dst.write(out_image)
 
 
@@ -642,6 +915,7 @@ def burn_polygon_add(
         rasterio_dtype (rasterio.dtype, optional): Rasterio datatype to use for the output raster.
         nodata_val (int/float, optional): Value to use for nodata. If None, will use the nodata value of the base raster.
         burn_attribute (str, optional): Attribute to use for burning. If None, will burn all polygons with the same value.
+        constraining_raster_value_tuple (tuple, optional): Tuple of (pathlike, int/float) to use for constraining the output raster. If None, will not constrain.
 
     Returns:
         None
@@ -652,8 +926,15 @@ def burn_polygon_add(
     base_raster_path = Path(base_raster_path)
     intermediate_workspace_path = Path(intermediate_workspace_path)
 
+    # Get raster info
+    base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
+
+    assert (
+        base_raster_info["nodata"][0] is not None
+    ), f"Warning: base_raster_path ({base_raster_path}) does not have a defined NoData value."
+
     # Dissolve vector to single feature to avoid overlapping polygons
-    logger.info(f"Dissolving burn vector")
+    logger.debug(f"Dissolving burn vector")
     vector_gdf = gpd.read_file(vector_path)
     vector_gdf = vector_gdf.dissolve()
     dissolved_vector_path = (
@@ -679,8 +960,11 @@ def burn_polygon_add(
             rasterio_dtype=rasterio_dtype,
         )
 
+    # Get raster info for intermediate raster
+    target_raster_info = pygeoprocessing.get_raster_info(str(intermediate_raster_path))
+
     # Burn and add vector to raster values
-    logger.info(f"Burning vector into raster")
+    logger.debug(f"Burning vector into raster")
     if burn_attribute is not None:
         pygeoprocessing.rasterize(
             str(dissolved_vector_path),
@@ -696,10 +980,6 @@ def burn_polygon_add(
             option_list=["MERGE_ALG=ADD"],
         )
 
-    # Get raster info
-    base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
-    target_raster_info = pygeoprocessing.get_raster_info(str(intermediate_raster_path))
-
     # Constraining output by constraint raster, if called for
     if constraining_raster_value_tuple is not None:
         # Create constraining raster calculator function
@@ -713,7 +993,7 @@ def burn_polygon_add(
             return out_array
 
         # Replace values in intermediate raster with original raster values where constrained
-        logger.info(f"Constraining burn by raster")
+        logger.debug(f"Constraining burn by raster")
         constrained_raster_path = (
             intermediate_workspace_path
             / f"_constrained_burned_{Path(base_raster_path).stem}.tif"
@@ -735,7 +1015,7 @@ def burn_polygon_add(
         intermediate_raster_path = constrained_raster_path
 
     # Remove areas where vector burned over nodata
-    logger.info(f"Removing nodata areas")
+    logger.debug(f"Removing nodata areas")
 
     def mask_op(base_array, mask_array, nodata):
         result = np.copy(base_array)
@@ -746,7 +1026,7 @@ def burn_polygon_add(
         [
             (str(intermediate_raster_path), 1),
             (str(base_raster_path), 1),
-            (base_raster_info["nodata"], "raw"),
+            (base_raster_info["nodata"][0], "raw"),
         ],
         mask_op,
         str(target_raster_path),
@@ -763,6 +1043,7 @@ def overlay_on_top_of_lulc(
     burn_value: int | float = 1,
     nodata_val: int | float = None,
     burn_attribute: str = None,
+    constraining_raster_value_tuple: tuple = None,
 ):
     """Burns a polygon into a raster by adding a specified value, ensuring that the burn values are using digits unused in the base raster.
 
@@ -774,6 +1055,7 @@ def overlay_on_top_of_lulc(
         burn_value (int): Value to be burned into the raster.
         nodata_val (int/float): Value to use for nodata. If None, will use the nodata value of the base raster.
         burn_attribute (str): Attribute to use for burning. If None, will burn all polygons with the same value.
+        constraining_raster_value_tuple (tuple, optional): Tuple of (pathlike, int/float) to use for constraining the output raster. If None, will not constrain.
     """
 
     # Extract maximum value of the raster to determine how many digits are needed
@@ -792,20 +1074,25 @@ def overlay_on_top_of_lulc(
         )
         vector_gdf.to_file(intermediate_vector_path)
         # Get the minimum raster datatype possible to house the digits required for this overlay
-        rasterio_dtype = rio.dtypes.get_minimum_dtype(vector_gdf[burn_attribute].max())
+        rasterio_dtype = rio.dtypes.get_minimum_dtype(
+            [vector_gdf[burn_attribute].max(), nodata_val]
+        )
     else:
         intermediate_vector_path = vector_path
-        rasterio_dtype = rio.dtypes.get_minimum_dtype(burn_value * 10**lulc_digits)
+        rasterio_dtype = rio.dtypes.get_minimum_dtype(
+            [burn_value * 10**lulc_digits, nodata_val]
+        )
 
     burn_polygon_add(
         intermediate_vector_path,
         base_lulc_path,
         intermediate_workspace_path,
         target_raster_path,
-        burn_value,
-        rasterio_dtype,
-        nodata_val,
-        burn_attribute,
+        burn_value=burn_value,
+        rasterio_dtype=rasterio_dtype,
+        nodata_val=nodata_val,
+        burn_attribute=burn_attribute,
+        constraining_raster_value_tuple=constraining_raster_value_tuple,
     )
 
 
@@ -982,6 +1269,53 @@ def assign_raster_labels_and_colors(
     del band, raster
 
 
+def make_scenario_suffix(file_suffix, scenario_suffix):
+    """Create a suffix for output files based on the file_suffix and scenario_suffix
+    in the following format: "_{file_suffix}_{scenario_suffix}" """
+    if file_suffix != "" and not file_suffix.startswith("_"):
+        file_suffix = "_" + file_suffix
+    if (
+        scenario_suffix != ""
+        and not scenario_suffix.startswith("_")
+        and not file_suffix.endswith("_")
+    ):
+        scenario_suffix = "_" + scenario_suffix
+
+    return f"{file_suffix}{scenario_suffix}"
+
+
+def conditional_vector_project(
+    vector_path: pathlike, projection_wkt: str, workspace_dir: pathlike
+):
+    """Tests if the selected vector is in the selected projection and if not, project it and create new file.
+
+    Args:
+        vector_path (pathlike): Path to vector to conditionally project
+        projection_wkt (str): Well-Known_Text of desired geospatial projection
+        workspace_dir (pathlike): Path to folder in which to deposit resulting file, if projected.
+
+    Returns:
+        target_path (Path): Path to resulting vector (either the original or the newly projected)
+    """
+
+    # Ensure all pathlike variables are paths
+    parcel_vector = Path(parcel_vector)
+    workspace_dir = Path(workspace_dir)
+
+    vector_info = pygeoprocessing.get_vector_info(str(vector_path))
+    if vector_info["projection_wkt"] != projection_wkt:
+        target_path = workspace_dir / vector_path.name
+        if target_path.is_file():
+            target_path = workspace_dir / f"{vector_path.stem}_proj{vector_path.suffix}"
+        logger.debug(f"Reprojecting {vector_path.name}")
+        pygeoprocessing.reproject_vector(
+            str(vector_path), projection_wkt, str(target_path)
+        )
+    else:
+        target_path = vector_path
+    return target_path
+
+
 # def burn_polygon_add_constrained(
 #     vector_path,
 #     raster_path,
@@ -1019,7 +1353,7 @@ def assign_raster_labels_and_colors(
 #     intermediate_workspace_path = Path(intermediate_workspace_path)
 
 #     # Dissolve vector to single feature to avoid overlapping polygons
-#     logger.info(f"Dissolving burn vector")
+#     logger.debug(f"Dissolving burn vector")
 #     vector_gdf = gpd.read_file(vector_path)
 #     vector_gdf = vector_gdf.dissolve()
 #     dissolved_vector_path = (
@@ -1046,7 +1380,7 @@ def assign_raster_labels_and_colors(
 #         )
 
 #     # Burn and add vector to raster values
-#     logger.info(f"Burning vector into raster")
+#     logger.debug(f"Burning vector into raster")
 #     if burn_attribute is not None:
 #         pygeoprocessing.rasterize(
 #             str(dissolved_vector_path),
@@ -1071,7 +1405,7 @@ def assign_raster_labels_and_colors(
 #         return out_array
 
 #     # Replace values in intermediate raster with original raster values where constrained
-#     logger.info(f"Constraining burn by raster")
+#     logger.debug(f"Constraining burn by raster")
 #     pygeoprocessing.raster_calculator(
 #         [
 #             (str(raster_path), 1),
