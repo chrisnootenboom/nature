@@ -347,14 +347,13 @@ _EXPECTED_GUILD_HEADERS = [
 ]
 
 # These patterns are expected in the biophysical table if calculating yield
-_CROP_POLLINATOR_DEPENDENCE_PATTERN = "crop_pollinator_dependence_%s_index"
-_CROP_POLLINATOR_DEPENDENCE_RE_PATTERN = _CROP_POLLINATOR_DEPENDENCE_PATTERN % "([^_]+)"
+_CROP_POLLINATOR_DEPENDENCE_FIELD = "crop_pollinator_dependence_index"
 _HALF_SATURATION_FIELD = "half_saturation_coefficient"
 _CROP_VALUE_FIELD = "value_per_hectare"
 _EXPECTED_BIOPHYSICAL_YIELD_HEADERS = [
     _NESTING_SUBSTRATE_RE_PATTERN,
     _FLORAL_RESOURCES_AVAILABLE_RE_PATTERN,
-    _CROP_POLLINATOR_DEPENDENCE_RE_PATTERN,
+    _CROP_POLLINATOR_DEPENDENCE_FIELD,
     _HALF_SATURATION_FIELD,
     _CROP_VALUE_FIELD,
 ]
@@ -369,16 +368,18 @@ _HABITAT_NESTING_INDEX_FILE_PATTERN = "habitat_nesting_index_%s%s.tif"
 _SEASONAL_FLORAL_ABUNDANCE_INDEX_FILE_PATTERN = (
     "seasonal_floral_abundance_index_%s%s.tif"
 )
-# seasonal forage (i.e. seasonal floral resources multiplied by species foraging activity)
+# perceived seasonal floral resources (i.e. seasonal floral resources multiplied by species foraging activity)
 # #replace (species, season, file_suffix)
-_SEASONAL_FORAGE_INDEX_FILE_PATTERN = "seasonal_forage_index_%s_%s%s.tif"
-# annual forage (i.e. sum of seasonal floral resources by species)
+_PERCEIVED_SEASONAL_FLORAL_INDEX_FILE_PATTERN = (
+    "perceived_seasonal_floral_index_%s_%s%s.tif"
+)
+# perceived annual floral resources (i.e. sum of seasonal floral resources by species)
 # #replace (species, file_suffix)
-_ANNUAL_FORAGE_INDEX_FILE_PATTERN = "annual_forage_index_%s%s.tif"
-# convolution of annual forage replace (species, file_suffix)
+_PERCEIVED_ANNUAL_FLORAL_INDEX_FILE_PATTERN = "perceived_annual_floral_index_%s%s.tif"
+# convolution of perceived annual floral resources replace (species, file_suffix)
 _FORAGING_EFFECTIVENESS_FILE_PATTERN = "foraging_effectiveness_%s%s.tif"
 # convolution of habitat nesting replaced by (species, file_suffix)
-_LOCAL_NESTING_DENSITY_FILE_PATTERN = "local_nesting_density_%s%s.tif"
+_NESTING_DENSITY_FILE_PATTERN = "nesting_density_%s%s.tif"
 
 # used to store the 2D decay kernel for a given distance replace
 # (alpha, file suffix)
@@ -405,25 +406,21 @@ _CROP_POLLINATOR_DEPENDENCE_FILE_PATTERN = "crop_pollinator_dependence_%s%s.tif"
 _HALF_SATURATION_FILE_PATTERN = "half_saturation_%s.tif"
 # crop value raster replace (file_suffix)
 _CROP_VALUE_FILE_PATTERN = "crop_value_%s.tif"
-# seasonal crop yield raster replace (season, file_suffix)
-_SEASONAL_YIELD_FILE_PATTERN = "seasonal_yield_%s%s.tif"
 # annual crop yield raster replace (file_suffix)
 _ANNUAL_YIELD_FILE_PATTERN = "annual_yield_%s.tif"
 # realized value of crop yield raster replace (file_suffix)
 _ANNUAL_YIELD_VALUE_FILE_PATTERN = "annual_yield_value_%s.tif"
 
-# change in crop yield raster replace (season, file_suffix)
-_DELTA_SEASONAL_YIELD_BY_VISITATION_FILE_PATTERN = (
-    "d_seasonal_yield_d_pollinator_visitation_%s%s.tif"
-)
 # change in crop yield raster replace (file_suffix)
-_DELTA_ANNUAL_YIELD_FILE_PATTERN = "d_annual_yield_d_pollinator_visitation_%s.tif"
+_DELTA_ANNUAL_YIELD_BY_VISITATION_FILE_PATTERN = (
+    "d_annual_yield_d_pollinator_visitation_%s.tif"
+)
 # change in crop yield raster replace (season, file_suffix)
 _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_FILE_PATTERN = (
     "d_annual_yield_d_pollinator_landscape_score_%s.tif"
 )
 # change in crop yield raster replace (season, file_suffix)
-_DELTA_ANNUAL_YIELD_BY_HABITAT_FILE_PATTERN = "d_annual_yield_d_habitat_%s.tif"
+_DELTA_ANNUAL_YIELD_FILE_PATTERN = "d_annual_yield_%s.tif"
 # change in realized value of crop yield replace (season, file_suffix)
 _DELTA_ANNUAL_YIELD_VALUE_FILE_PATTERN = "d_yield_value_%s.tif"
 
@@ -552,11 +549,13 @@ def execute(args):
     landcover_substrate_index_task_map = {name: {} for name in scenario_labels_list}
     habitat_nesting_task_map = {name: {} for name in scenario_labels_list}
     seasonal_floral_abundance_task_map = {name: {} for name in scenario_labels_list}
-    seasonal_forage_index_task_map = {name: {} for name in scenario_labels_list}
-    annual_forage_index_task_map = {name: {} for name in scenario_labels_list}
+    perceived_seasonal_floral_index_task_map = {
+        name: {} for name in scenario_labels_list
+    }
+    perceived_annual_floral_index_task_map = {name: {} for name in scenario_labels_list}
     warp_rasters_task_map = {
         "habitat_nesting": {name: {} for name in scenario_labels_list},
-        "annual_forage": {name: {} for name in scenario_labels_list},
+        "perceived_annual_floral": {name: {} for name in scenario_labels_list},
     }
     species_foraging_effectiveness_index_task_map = {
         name: {} for name in scenario_labels_list
@@ -576,8 +575,8 @@ def execute(args):
         "nesting_substrate_index_path",
         "habitat_nesting_index_path",
         "seasonal_floral_abundance_index_path",
-        "seasonal_forage_index_path",
-        "annual_forage_index_path",
+        "perceived_seasonal_floral_index_path",
+        "perceived_annual_floral_index_path",
         "foraging_effectiveness_index_path",
         "species_landscape_score_path",
         "species_pollinator_visitation_index_path",
@@ -719,13 +718,14 @@ def execute(args):
 
         # calculate season- and species-dependent forage
         for species in scenario_variables["species_list"]:
-            # calculate seasonal_forage_species_season = RA(l(x),j)*fa(s,j)
+            # calculate perceived_seasonal_floral_species_season = RA(l(x),j)*fa(s,j)
             for season in scenario_variables["season_list"]:
                 LOGGER.info(
                     f"{scenario_name} | Creating Seasonal Forage raster for species, season: {species}, {season}"
                 )
-                seasonal_forage_index_path = species_season_dir / (
-                    _SEASONAL_FORAGE_INDEX_FILE_PATTERN % (species, season, file_suffix)
+                perceived_seasonal_floral_index_path = species_season_dir / (
+                    _PERCEIVED_SEASONAL_FLORAL_INDEX_FILE_PATTERN
+                    % (species, season, file_suffix)
                 )
                 seasonal_floral_abundance_path = scenario_variables[
                     "seasonal_floral_abundance_index_path"
@@ -734,16 +734,16 @@ def execute(args):
                     scenario_variables["species_foraging_activity"][(species, season)],
                     _INDEX_NODATA,
                 )
-                seasonal_forage_index_task_map[scenario_name][
+                perceived_seasonal_floral_index_task_map[scenario_name][
                     (species, season)
                 ] = task_graph.add_task(
-                    task_name=f"calculate_seasonal_forage_{species}_{season}_{scenario_name}",
+                    task_name=f"calculate_perceived_seasonal_floral_{species}_{season}_{scenario_name}",
                     func=pygeoprocessing.raster_calculator,
                     args=(
                         [
                             [(str(seasonal_floral_abundance_path), 1)],
                             multiply_by_scalar_op,
-                            str(seasonal_forage_index_path),
+                            str(perceived_seasonal_floral_index_path),
                             gdal.GDT_Float32,
                             _INDEX_NODATA,
                         ]
@@ -751,48 +751,52 @@ def execute(args):
                     dependent_task_list=[
                         seasonal_floral_abundance_task_map[scenario_name][season]
                     ],
-                    target_path_list=[str(seasonal_forage_index_path)],
+                    target_path_list=[str(perceived_seasonal_floral_index_path)],
                 )
-                scenario_variables["seasonal_forage_index_path"][scenario_name][
-                    (species, season)
-                ] = seasonal_forage_index_path
+                scenario_variables["perceived_seasonal_floral_index_path"][
+                    scenario_name
+                ][(species, season)] = perceived_seasonal_floral_index_path
 
-            # calculate annual_forage_species: FE(x, s) = sum_j [RA(l(x), j) * fa(s, j)]
-            seasonal_forage_path_band_list = [
+            # calculate perceived_annual_floral_species: FE(x, s) = sum_j [RA(l(x), j) * fa(s, j)]
+            perceived_seasonal_floral_path_band_list = [
                 (
                     str(
-                        scenario_variables["seasonal_forage_index_path"][scenario_name][
-                            (species, season)
-                        ]
+                        scenario_variables["perceived_seasonal_floral_index_path"][
+                            scenario_name
+                        ][(species, season)]
                     ),
                     1,
                 )
                 for season in scenario_variables["season_list"]
             ]
-            annual_forage_index_path = species_dir / (
-                _ANNUAL_FORAGE_INDEX_FILE_PATTERN % (species, file_suffix)
+            perceived_annual_floral_index_path = species_dir / (
+                _PERCEIVED_ANNUAL_FLORAL_INDEX_FILE_PATTERN % (species, file_suffix)
             )
 
-            annual_forage_index_task_map[scenario_name][species] = task_graph.add_task(
-                task_name=f"annual_forage_{species}",
+            perceived_annual_floral_index_task_map[scenario_name][
+                species
+            ] = task_graph.add_task(
+                task_name=f"perceived_annual_floral_{species}",
                 func=pygeoprocessing.raster_calculator,
                 args=(
-                    seasonal_forage_path_band_list,
+                    perceived_seasonal_floral_path_band_list,
                     sum_raster_op,
-                    str(annual_forage_index_path),
+                    str(perceived_annual_floral_index_path),
                     gdal.GDT_Float32,
                     _INDEX_NODATA,
                 ),
-                target_path_list=[str(annual_forage_index_path)],
+                target_path_list=[str(perceived_annual_floral_index_path)],
                 dependent_task_list=[
-                    seasonal_forage_index_task_map[scenario_name][(species, season)]
+                    perceived_seasonal_floral_index_task_map[scenario_name][
+                        (species, season)
+                    ]
                     for season in scenario_variables["season_list"]
                 ],
             )
 
-            scenario_variables["annual_forage_index_path"][scenario_name][
+            scenario_variables["perceived_annual_floral_index_path"][scenario_name][
                 species
-            ] = annual_forage_index_path
+            ] = perceived_annual_floral_index_path
 
         # Aggregate raster data if necessary
         if args["aggregate_size"] is not None:
@@ -840,25 +844,25 @@ def execute(args):
                 )
 
                 # Aggregate annual forage index
-                forage_index = scenario_variables["annual_forage_index_path"][
+                floral_index = scenario_variables["perceived_annual_floral_index_path"][
                     scenario_name
                 ][species]
-                scenario_variables["annual_forage_index_path"][scenario_name][
+                scenario_variables["perceived_annual_floral_index_path"][scenario_name][
                     species
-                ] = forage_index.replace(".tif", "_aggregated.tif")
-                warp_rasters_task_map["annual_forage"][scenario_name][
+                ] = floral_index.replace(".tif", "_aggregated.tif")
+                warp_rasters_task_map["perceived_annual_floral"][scenario_name][
                     species
                 ] = task_graph.add_task(
-                    task_name=f"aggregate_annual_forage_raster_{species}_{scenario_name}",
+                    task_name=f"aggregate_perceived_annual_floral_raster_{species}_{scenario_name}",
                     func=pygeoprocessing.warp_raster,
                     args=(
                         [
-                            str(forage_index),
+                            str(floral_index),
                             landcover_pixel_size_tuple,
                             str(
-                                scenario_variables["annual_forage_index_path"][
-                                    scenario_name
-                                ][species]
+                                scenario_variables[
+                                    "perceived_annual_floral_index_path"
+                                ][scenario_name][species]
                             ),
                         ]
                     ),
@@ -867,12 +871,12 @@ def execute(args):
                         "target_bb": landcover_raster_info["bounding_box"],
                     },
                     dependent_task_list=[
-                        annual_forage_index_task_map[scenario_name][species]
+                        perceived_annual_floral_index_task_map[scenario_name][species]
                     ],
                     target_path_list=[
-                        scenario_variables["annual_forage_index_path"][scenario_name][
-                            [species]
-                        ]
+                        scenario_variables["perceived_annual_floral_index_path"][
+                            scenario_name
+                        ][[species]]
                     ],
                 )
 
@@ -880,9 +884,9 @@ def execute(args):
             warp_rasters_task_map["habitat_nesting"][
                 scenario_name
             ] = habitat_nesting_task_map[scenario_name]
-            warp_rasters_task_map["annual_forage"][
+            warp_rasters_task_map["perceived_annual_floral"][
                 scenario_name
-            ] = annual_forage_index_task_map[scenario_name]
+            ] = perceived_annual_floral_index_task_map[scenario_name]
             landcover_pixel_size_tuple = landcover_raster_info["pixel_size"]
 
         # Iterate through species and calculate marginal values and baseline landscape score and visitation
@@ -919,20 +923,24 @@ def execute(args):
                 target_path_list=[str(kernel_path)],
                 dependent_task_list=(
                     [warp_rasters_task_map["habitat_nesting"][scenario_name][species]]
-                    + [warp_rasters_task_map["annual_forage"][scenario_name][species]]
+                    + [
+                        warp_rasters_task_map["perceived_annual_floral"][scenario_name][
+                            species
+                        ]
+                    ]
                 ),
             )
 
             if scenario_name == BASELINE_SCENARIO_LABEL:
                 # convolve HN with alpha_s
                 LOGGER.info(
-                    f"{scenario_name} | Calculating Local Nesting Density convolution for species: {species}"
+                    f"{scenario_name} | Calculating Nesting Density convolution for species: {species}"
                 )
-                baseline_local_nesting_density_path = intermediate_output_dir / (
-                    _LOCAL_NESTING_DENSITY_FILE_PATTERN % (species, file_suffix)
+                baseline_nesting_density_path = intermediate_output_dir / (
+                    _NESTING_DENSITY_FILE_PATTERN % (species, file_suffix)
                 )
 
-                baseline_local_nesting_density_task = task_graph.add_task(
+                baseline_nesting_density_task = task_graph.add_task(
                     task_name=f"convolve_nesting_{species}_{scenario_name}",
                     func=pygeoprocessing.convolve_2d,
                     args=(
@@ -946,7 +954,7 @@ def execute(args):
                                 1,
                             ),
                             (str(kernel_path), 1),
-                            str(baseline_local_nesting_density_path),
+                            str(baseline_nesting_density_path),
                         ]
                     ),
                     kwargs={
@@ -958,7 +966,7 @@ def execute(args):
                         alpha_kernel_raster_task,
                         habitat_nesting_task_map[scenario_name][species],
                     ],
-                    target_path_list=[str(baseline_local_nesting_density_path)],
+                    target_path_list=[str(baseline_nesting_density_path)],
                 )
 
                 # convolve annual forage with alpha_s
@@ -972,15 +980,15 @@ def execute(args):
                 species_foraging_effectiveness_index_task_map[scenario_name][
                     species
                 ] = task_graph.add_task(
-                    task_name=f"convolve_annual_forage_{species}_{scenario_name}",
+                    task_name=f"convolve_perceived_annual_floral_{species}_{scenario_name}",
                     func=pygeoprocessing.convolve_2d,
                     args=(
                         [
                             (
                                 str(
-                                    scenario_variables["annual_forage_index_path"][
-                                        scenario_name
-                                    ][species]
+                                    scenario_variables[
+                                        "perceived_annual_floral_index_path"
+                                    ][scenario_name][species]
                                 ),
                                 1,
                             ),
@@ -1007,6 +1015,10 @@ def execute(args):
                 LOGGER.info(
                     f"{scenario_name} | Calculating Pollinator Landscape Score for species: {species}"
                 )
+                # QUESTION should we weight species Landscape Score by relative abundance?
+                # QUESTION We do this for visitation (at least when calculating total visitation)
+                # QUESTION Also, should we sum this to total Landscape Score?
+
                 species_landscape_score_path = species_dir / (
                     _SPECIES_LANDSCAPE_SCORE_FILE_PATTERN % (species, file_suffix)
                 )
@@ -1051,6 +1063,7 @@ def execute(args):
                 # Calculate pollinator visitation by convolving landscape score by alpha
                 # QUESTION should we weight this visitation by relative abundance? This step is done within the TOTAL_VISITATION
                 # QUESTION step already but it might be clearer if we do it here, so the rasters will clearly sum together.
+                # TODO Weigh Visitation by relative abundance so each raster is relative to other species.
                 LOGGER.info(
                     f"{scenario_name} | Calculating Pollinator Visitation convolution for species: {species}"
                 )
@@ -1110,16 +1123,16 @@ def execute(args):
                     args=[
                         kernel_path,
                         scenario_variables["species_abundance"][species],
-                        baseline_local_nesting_density_path,
+                        baseline_nesting_density_path,
                         scenario_variables["foraging_effectiveness_index_path"][
                             BASELINE_SCENARIO_LABEL
                         ][species],
-                        scenario_variables["annual_forage_index_path"][
+                        scenario_variables["perceived_annual_floral_index_path"][
                             BASELINE_SCENARIO_LABEL
                         ][species],
-                        scenario_variables["annual_forage_index_path"][scenario_name][
-                            species
-                        ],
+                        scenario_variables["perceived_annual_floral_index_path"][
+                            scenario_name
+                        ][species],
                         scenario_variables["habitat_nesting_index_path"][
                             BASELINE_SCENARIO_LABEL
                         ][species],
@@ -1129,14 +1142,16 @@ def execute(args):
                         d_pollinator_species_landscape_score_path,
                     ],
                     dependent_task_list=[
-                        baseline_local_nesting_density_task,
+                        baseline_nesting_density_task,
                         species_foraging_effectiveness_index_task_map[
                             BASELINE_SCENARIO_LABEL
                         ][species],
-                        warp_rasters_task_map["annual_forage"][BASELINE_SCENARIO_LABEL][
+                        warp_rasters_task_map["perceived_annual_floral"][
+                            BASELINE_SCENARIO_LABEL
+                        ][species],
+                        warp_rasters_task_map["perceived_annual_floral"][scenario_name][
                             species
                         ],
-                        warp_rasters_task_map["annual_forage"][scenario_name][species],
                         warp_rasters_task_map["habitat_nesting"][
                             BASELINE_SCENARIO_LABEL
                         ][species],
@@ -1151,7 +1166,6 @@ def execute(args):
                     scenario_name
                 ][species] = d_pollinator_species_landscape_score_path
 
-        # [x] TODO total pollinator visitation
         if scenario_name == BASELINE_SCENARIO_LABEL:
             # calculate total pollinator visitation by summing all species visitation rates
             # (multiplied by their relative abundance)
@@ -1247,12 +1261,11 @@ def execute(args):
                 "crop_pollinator_dependence_raster_path",
                 "half_saturation_coefficient_raster_path",
                 "crop_value_raster_path",
-                "seasonal_yield_raster_path",
                 "annual_yield_raster_path",
                 "annual_yield_value_raster_path",
-                "delta_seasonal_yield_raster_path",
+                "delta_annual_yield_by_visitation_raster_path",
+                "delta_annual_yield_by_landscape_score_raster_path",
                 "delta_annual_yield_raster_path",
-                "delta_annual_yield_convolution_raster_path",
                 "delta_annual_yield_value_raster_path",
             ]:
                 scenario_variables[scenario_variable_list] = {
@@ -1265,58 +1278,49 @@ def execute(args):
             }
             half_saturation_tasks = {name: {} for name in scenario_labels_list}
             crop_value_tasks = {name: {} for name in scenario_labels_list}
-            seasonal_yield_tasks = {name: {} for name in scenario_labels_list}
             annual_yield_tasks = {name: {} for name in scenario_labels_list}
             annual_yield_value_tasks = {name: {} for name in scenario_labels_list}
-            delta_seasonal_yield_tasks = {name: {} for name in scenario_labels_list}
+            delta_annual_yield_by_visitation_tasks = {
+                name: {} for name in scenario_labels_list
+            }
+            delta_annual_yield_by_landscape_score_tasks = {
+                name: {} for name in scenario_labels_list
+            }
             delta_annual_yield_tasks = {name: {} for name in scenario_labels_list}
-            delta_annual_yield_convolution_tasks = {
-                name: {} for name in scenario_labels_list
-            }
-            delta_annual_yield_habitat_tasks = {
-                name: {} for name in scenario_labels_list
-            }
             delta_annual_yield_value_tasks = {name: {} for name in scenario_labels_list}
 
             # Reclassify raster to crop pollinator dependence
-            for season in scenario_variables["season_list"]:
-                LOGGER.info(
-                    f"{scenario_name} | Creating Crop Pollinator Dependence raster for season: {season}"
-                )
-                crop_pollinator_dependence_raster_path = season_dir / (
-                    _CROP_POLLINATOR_DEPENDENCE_FILE_PATTERN % (season, file_suffix)
-                )
+            LOGGER.info(f"{scenario_name} | Creating Crop Pollinator Dependence raster")
+            crop_pollinator_dependence_raster_path = intermediate_output_dir / (
+                _CROP_POLLINATOR_DEPENDENCE_FILE_PATTERN % file_suffix
+            )
 
-                crop_pollinator_dependence_tasks[scenario_name][
-                    season
-                ] = task_graph.add_task(
-                    task_name=f"reclassify_to_crop_pollinator_dependence_{season}_{scenario_name}",
-                    func=utils.reclassify_raster,
-                    args=(
-                        [
-                            (
-                                str(
-                                    scenario_args_dict["landcover_raster_path"][
-                                        scenario_name
-                                    ]
-                                ),
-                                1,
+            crop_pollinator_dependence_tasks[scenario_name] = task_graph.add_task(
+                task_name=f"reclassify_to_crop_pollinator_dependence_{scenario_name}",
+                func=utils.reclassify_raster,
+                args=(
+                    [
+                        (
+                            str(
+                                scenario_args_dict["landcover_raster_path"][
+                                    scenario_name
+                                ]
                             ),
-                            scenario_variables["crop_pollinator_dependence"][
-                                scenario_name
-                            ][season],
-                            str(crop_pollinator_dependence_raster_path),
-                            gdal.GDT_Float32,
-                            _INDEX_NODATA,
-                            reclass_error_details,
-                        ]
-                    ),
-                    target_path_list=[str(crop_pollinator_dependence_raster_path)],
-                )
+                            1,
+                        ),
+                        scenario_variables["crop_pollinator_dependence"][scenario_name],
+                        str(crop_pollinator_dependence_raster_path),
+                        gdal.GDT_Float32,
+                        _INDEX_NODATA,
+                        reclass_error_details,
+                    ]
+                ),
+                target_path_list=[str(crop_pollinator_dependence_raster_path)],
+            )
 
-                scenario_variables["crop_pollinator_dependence_raster_path"][
-                    scenario_name
-                ][season] = crop_pollinator_dependence_raster_path
+            scenario_variables["crop_pollinator_dependence_raster_path"][
+                scenario_name
+            ] = crop_pollinator_dependence_raster_path
 
             # Reclassify raster to half saturation
             LOGGER.info(
@@ -1384,101 +1388,53 @@ def execute(args):
             ] = crop_value_raster_path
 
             if scenario_name == BASELINE_SCENARIO_LABEL:
-                for season in scenario_variables["season_list"]:
-                    LOGGER.info(
-                        f"{scenario_name} | Creating Crop Yield raster for season: {season}"
-                    )
-                    seasonal_yield_raster_path = season_dir / (
-                        _SEASONAL_YIELD_FILE_PATTERN % (season, file_suffix)
-                    )
+                LOGGER.info(f"{scenario_name} | Creating Crop Yield raster")
 
-                    seasonal_yield_tasks[scenario_name][season] = task_graph.add_task(
-                        task_name=f"calculate_baseline_yield_{season}_{scenario_name}",
-                        func=pygeoprocessing.raster_calculator,
-                        args=(
-                            [
-                                (
-                                    str(
-                                        scenario_variables[
-                                            "crop_pollinator_dependence_raster_path"
-                                        ][scenario_name][season]
-                                    ),
-                                    1,
-                                ),
-                                (
-                                    str(
-                                        scenario_variables[
-                                            "half_saturation_coefficient_raster_path"
-                                        ][scenario_name]
-                                    ),
-                                    1,
-                                ),
-                                (
-                                    str(
-                                        scenario_variables[
-                                            "total_pollinator_visitation_index_path"
-                                        ][
-                                            scenario_name
-                                        ]  # NOTE this is annual visitation, not seasonal
-                                    ),
-                                    1,
-                                ),
-                            ],
-                            yield_op,
-                            str(seasonal_yield_raster_path),
-                            gdal.GDT_Float32,
-                            _INDEX_NODATA,
-                        ),
-                        dependent_task_list=[
-                            crop_pollinator_dependence_tasks[scenario_name][season]
-                            for season in scenario_variables["season_list"]
-                        ]
-                        + [
-                            half_saturation_tasks[scenario_name],
-                            total_pollinator_visitation_task_map[scenario_name],
-                        ],
-                        target_path_list=[str(seasonal_yield_raster_path)],
-                    )
-
-                    scenario_variables["seasonal_yield_raster_path"][scenario_name][
-                        season
-                    ] = seasonal_yield_raster_path
-
-                LOGGER.info(f"{scenario_name} | Creating Annual Crop Yield raster")
-                # calculate annual yield from seasonal yields
-                # QUESTION should we ensure this value does not exceed 1? It's possible that crops have multiple seasons where
-                # QUESTION pollinators contribute to annual yield, so when summing we may exceed 1.
-                # QUESTION Solution is either Max(yield) or Max(yield, 1)
-                seasonal_yield_raster_path_band_list = [
-                    (
-                        str(
-                            scenario_variables["seasonal_yield_raster_path"][
-                                scenario_name
-                            ][season]
-                        ),
-                        1,
-                    )
-                    for season in scenario_variables["season_list"]
-                ]
                 annual_yield_raster_path = output_dir / (
                     _ANNUAL_YIELD_FILE_PATTERN % file_suffix
                 )
 
                 annual_yield_tasks[scenario_name] = task_graph.add_task(
-                    task_name=f"calculate_annual_crop_yield_{scenario_name}",
+                    task_name=f"calculate_baseline_yield_{scenario_name}",
                     func=pygeoprocessing.raster_calculator,
                     args=(
-                        seasonal_yield_raster_path_band_list,
-                        sum_raster_op,  # QUESTION switch with sum_raster_cap_one_op
+                        [
+                            (
+                                str(
+                                    scenario_variables[
+                                        "crop_pollinator_dependence_raster_path"
+                                    ][scenario_name]
+                                ),
+                                1,
+                            ),
+                            (
+                                str(
+                                    scenario_variables[
+                                        "half_saturation_coefficient_raster_path"
+                                    ][scenario_name]
+                                ),
+                                1,
+                            ),
+                            (
+                                str(
+                                    scenario_variables[
+                                        "total_pollinator_visitation_index_path"
+                                    ][scenario_name]
+                                ),
+                                1,
+                            ),
+                        ],
+                        yield_op,
                         str(annual_yield_raster_path),
                         gdal.GDT_Float32,
                         _INDEX_NODATA,
                     ),
-                    target_path_list=[str(annual_yield_raster_path)],
                     dependent_task_list=[
-                        seasonal_yield_tasks[scenario_name][season]
-                        for season in scenario_variables["season_list"]
+                        crop_pollinator_dependence_tasks[scenario_name],
+                        half_saturation_tasks[scenario_name],
+                        total_pollinator_visitation_task_map[scenario_name],
                     ],
+                    target_path_list=[str(annual_yield_raster_path)],
                 )
 
                 scenario_variables["annual_yield_raster_path"][
@@ -1532,112 +1488,72 @@ def execute(args):
                 ] = annual_yield_value_raster_path
             else:
                 # Calculate delta yield
-                for season in scenario_variables["season_list"]:
-                    LOGGER.info(
-                        f"{scenario_name} | Calculating Seasonal Crop Yield Marginal Value raster: {season}"
-                    )
-                    delta_seasonal_yield_raster_path = season_dir / (
-                        _DELTA_SEASONAL_YIELD_BY_VISITATION_FILE_PATTERN
-                        % (season, file_suffix)
-                    )
-
-                    delta_seasonal_yield_tasks[scenario_name][
-                        season
-                    ] = task_graph.add_task(
-                        task_name=f"calculate_delta_yield_{season}_{scenario_name}",
-                        func=pygeoprocessing.raster_calculator,
-                        args=(
-                            [
-                                (
-                                    str(
-                                        scenario_variables[
-                                            "crop_pollinator_dependence_raster_path"
-                                        ][scenario_name][season]
-                                    ),
-                                    1,
-                                ),
-                                (
-                                    str(
-                                        scenario_variables[
-                                            "half_saturation_coefficient_raster_path"
-                                        ][scenario_name]
-                                    ),
-                                    1,
-                                ),
-                                (
-                                    str(
-                                        scenario_variables[
-                                            "total_pollinator_visitation_index_path"  # NOTE this is annual visitation, not seasonal
-                                        ][BASELINE_SCENARIO_LABEL]
-                                    ),
-                                    1,
-                                ),
-                            ],
-                            delta_yield_op,
-                            str(delta_seasonal_yield_raster_path),
-                            gdal.GDT_Float32,
-                            _INDEX_NODATA,
-                        ),
-                        target_path_list=[str(delta_seasonal_yield_raster_path)],
-                        dependent_task_list=[
-                            crop_pollinator_dependence_tasks[scenario_name][season]
-                            for season in scenario_variables["season_list"]
-                        ]
-                        + [half_saturation_tasks[scenario_name]],
-                    )
-
-                    scenario_variables["delta_seasonal_yield_raster_path"][
-                        scenario_name
-                    ][season] = delta_seasonal_yield_raster_path
-
-                # calculate the marginal change in annual crop yield
                 LOGGER.info(
-                    f"{scenario_name} | Calculating Annual Crop Yield Marginal Value raster (by change in visitation)"
+                    f"{scenario_name} | Calculating Crop Yield Marginal Value raster | By visitation"
                 )
-                delta_seasonal_yield_raster_path_band_list = [
-                    (
-                        str(
-                            scenario_variables["delta_seasonal_yield_raster_path"][
-                                scenario_name
-                            ][season]
-                        ),
-                        1,
-                    )
-                    for season in scenario_variables["season_list"]
-                ]
-                delta_annual_yield_raster_path = output_dir / (
-                    _DELTA_ANNUAL_YIELD_FILE_PATTERN % file_suffix
+                delta_annual_yield_by_visitation_raster_path = (
+                    intermediate_output_dir
+                    / (_DELTA_ANNUAL_YIELD_BY_VISITATION_FILE_PATTERN % file_suffix)
                 )
 
-                delta_annual_yield_tasks[scenario_name] = task_graph.add_task(
-                    task_name=f"calculate_delta_annual_crop_yield_{scenario_name}",
+                delta_annual_yield_by_visitation_tasks[
+                    scenario_name
+                ] = task_graph.add_task(
+                    task_name=f"calculate_delta_yield_by_visitation_{scenario_name}",
                     func=pygeoprocessing.raster_calculator,
                     args=(
-                        delta_seasonal_yield_raster_path_band_list,
-                        sum_raster_op,  # QUESTION switch with sum_raster_cap_one_op
-                        str(delta_annual_yield_raster_path),
+                        [
+                            (
+                                str(
+                                    scenario_variables[
+                                        "crop_pollinator_dependence_raster_path"
+                                    ][scenario_name]
+                                ),
+                                1,
+                            ),
+                            (
+                                str(
+                                    scenario_variables[
+                                        "half_saturation_coefficient_raster_path"
+                                    ][scenario_name]
+                                ),
+                                1,
+                            ),
+                            (
+                                str(
+                                    scenario_variables[
+                                        "total_pollinator_visitation_index_path"
+                                    ][BASELINE_SCENARIO_LABEL]
+                                ),
+                                1,
+                            ),
+                        ],
+                        delta_yield_op,
+                        str(delta_annual_yield_by_visitation_raster_path),
                         gdal.GDT_Float32,
                         _INDEX_NODATA,
                     ),
-                    target_path_list=[str(delta_annual_yield_raster_path)],
+                    target_path_list=[
+                        str(delta_annual_yield_by_visitation_raster_path)
+                    ],
                     dependent_task_list=[
-                        delta_seasonal_yield_tasks[scenario_name][season]
-                        for season in scenario_variables["season_list"]
+                        crop_pollinator_dependence_tasks[scenario_name],
+                        half_saturation_tasks[scenario_name],
                     ],
                 )
 
-                scenario_variables["delta_annual_yield_raster_path"][
+                scenario_variables["delta_annual_yield_by_visitation_raster_path"][
                     scenario_name
-                ] = delta_annual_yield_raster_path
+                ] = delta_annual_yield_by_visitation_raster_path
 
                 LOGGER.info(
-                    f"{scenario_name} | Convolving Annual Crop Yield Marginal Value raster"
+                    f"{scenario_name} | Calculating Crop Yield Marginal Value raster | By landscape score (convolve)"
                 )
-                delta_annual_yield_convolution_raster_path = output_dir / (
+                delta_annual_yield_by_landscape_score_raster_path = output_dir / (
                     _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_FILE_PATTERN % file_suffix
                 )
 
-                delta_annual_yield_convolution_tasks[
+                delta_annual_yield_by_landscape_score_tasks[
                     scenario_name
                 ] = task_graph.add_task(
                     task_name=f"calculate_delta_yield_by_landscape_score_{scenario_name}",
@@ -1647,13 +1563,13 @@ def execute(args):
                             (
                                 str(
                                     scenario_variables[
-                                        "delta_annual_yield_raster_path"
+                                        "delta_annual_yield_by_visitation_raster_path"
                                     ][scenario_name]
                                 ),
                                 1,
                             ),
                             (str(kernel_path), 1),
-                            str(delta_annual_yield_convolution_raster_path),
+                            str(delta_annual_yield_by_landscape_score_raster_path),
                         ]
                     ),
                     kwargs={
@@ -1661,31 +1577,35 @@ def execute(args):
                         "mask_nodata": True,
                         "normalize_kernel": False,
                     },
-                    target_path_list=[str(delta_annual_yield_convolution_raster_path)],
-                    dependent_task_list=[delta_annual_yield_tasks[scenario_name]],
+                    target_path_list=[
+                        str(delta_annual_yield_by_landscape_score_raster_path)
+                    ],
+                    dependent_task_list=[
+                        delta_annual_yield_by_visitation_tasks[scenario_name]
+                    ],
                 )
 
-                scenario_variables["delta_annual_yield_convolution_raster_path"][
+                scenario_variables["delta_annual_yield_by_landscape_score_raster_path"][
                     scenario_name
-                ] = delta_annual_yield_convolution_raster_path
+                ] = delta_annual_yield_by_landscape_score_raster_path
 
                 LOGGER.info(
-                    f"{scenario_name} | Calculating Annual Crop Yield Marginal Value raster (by change in habitat)"
+                    f"{scenario_name} | Calculating Crop Yield Marginal Value raster | Multiply by landscape score"
                 )
 
-                delta_annual_yield_habitat_raster_path = output_dir / (
-                    _DELTA_ANNUAL_YIELD_BY_HABITAT_FILE_PATTERN % file_suffix
+                delta_annual_yield_raster_path = output_dir / (
+                    _DELTA_ANNUAL_YIELD_FILE_PATTERN % file_suffix
                 )
 
-                delta_annual_yield_habitat_tasks[scenario_name] = task_graph.add_task(
-                    task_name=f"calculate_delta_yield_by_habitat_{scenario_name}",
+                delta_annual_yield_raster_path[scenario_name] = task_graph.add_task(
+                    task_name=f"calculate_delta_yield_{scenario_name}",
                     func=pygeoprocessing.raster_calculator,
                     args=(
                         [
                             (
                                 str(
                                     scenario_variables[
-                                        "delta_annual_yield_convolution_raster_path"
+                                        "delta_annual_yield_by_landscape_score_raster_path"
                                     ][scenario_name]
                                 ),
                                 1,
@@ -1708,20 +1628,22 @@ def execute(args):
                             ),
                         ],
                         delta_yield_habitat_op,
-                        str(delta_annual_yield_habitat_raster_path),
+                        str(delta_annual_yield_raster_path),
                         gdal.GDT_Float32,
                         _INDEX_NODATA,
                     ),
-                    target_path_list=[str(delta_annual_yield_habitat_raster_path)],
+                    target_path_list=[str(delta_annual_yield_raster_path)],
                     dependent_task_list=[
-                        delta_seasonal_yield_tasks[scenario_name][season]
-                        for season in scenario_variables["season_list"]
+                        delta_annual_yield_by_landscape_score_raster_path[
+                            scenario_name
+                        ],
+                        annual_yield_value_tasks[BASELINE_SCENARIO_LABEL],
                     ],
                 )
 
-                scenario_variables["delta_annual_yield_habitat_raster_path"][
+                scenario_variables["delta_annual_yield_raster_path"][
                     scenario_name
-                ] = delta_annual_yield_habitat_raster_path
+                ] = delta_annual_yield_raster_path
 
                 # calculate the marginal change in annual crop yield value
                 LOGGER.info(
@@ -1782,10 +1704,10 @@ sum_raster_cap_one_op = rasterops.SumRastersWithCap(1, _INDEX_NODATA)
 def d_pollinator_landscape_score_task_op(
     kernel_path,
     species_abundance,
-    baseline_local_nesting_density_path,
+    baseline_nesting_density_path,
     baseline_foraging_effectiveness_path,
-    baseline_seasonal_forage_path,
-    scenario_seasonal_forage_path,
+    baseline_perceived_seasonal_floral_path,
+    scenario_perceived_seasonal_floral_path,
     baseline_habitat_nesting_suitability_path,
     scenario_habitat_nesting_suitability_path,
     marginal_value_path,
@@ -1796,10 +1718,10 @@ def d_pollinator_landscape_score_task_op(
     marginal_value_op = _DeltaPollinatorLandscapeScoreOp(species_abundance)
     pygeoprocessing.raster_calculator(
         [
-            (str(baseline_local_nesting_density_path), 1),
+            (str(baseline_nesting_density_path), 1),
             (str(baseline_foraging_effectiveness_path), 1),
-            (str(baseline_seasonal_forage_path), 1),
-            (str(scenario_seasonal_forage_path), 1),
+            (str(baseline_perceived_seasonal_floral_path), 1),
+            (str(scenario_perceived_seasonal_floral_path), 1),
             (str(baseline_habitat_nesting_suitability_path), 1),
             (str(scenario_habitat_nesting_suitability_path), 1),
             (mid_kernel_weight, "raw"),
@@ -1842,7 +1764,7 @@ class _DeltaPollinatorLandscapeScoreOp(object):
 
     def __call__(
         self,
-        baseline_local_nesting_density_array,
+        baseline_nesting_density_array,
         baseline_foraging_effectiveness_array,
         baseline_seasonal_forage_array,
         scenario_seasonal_forage_array,
@@ -1873,7 +1795,7 @@ class _DeltaPollinatorLandscapeScoreOp(object):
             scenario_seasonal_forage_array[valid_mask]
             - baseline_seasonal_forage_array[valid_mask]
         )
-        nesting_density = baseline_local_nesting_density_array[valid_mask]
+        nesting_density = baseline_nesting_density_array[valid_mask]
         d_nesting = (
             scenario_habitat_nesting_suitability_array[valid_mask]
             - baseline_habitat_nesting_suitability_array[valid_mask]
@@ -2229,13 +2151,6 @@ def _parse_scenario_variables(
             if match:
                 substrate = match.group(1)
                 substrate_to_header[substrate]["biophysical"].append(match.group())
-            if yield_calc_bool:
-                match = re.match(_CROP_POLLINATOR_DEPENDENCE_RE_PATTERN, header)
-                if match:
-                    season = match.group(1)
-                    season_to_header[season]["crop_pollinator_dependence"].append(
-                        match.group()
-                    )
 
     season_to_header[season]["biophysical"] = list(
         set(season_to_header[season]["biophysical"])
@@ -2243,10 +2158,6 @@ def _parse_scenario_variables(
     substrate_to_header[substrate]["biophysical"] = list(
         set(substrate_to_header[substrate]["biophysical"])
     )
-    if yield_calc_bool:
-        season_to_header[season]["crop_pollinator_dependence"] = list(
-            set(season_to_header[season]["crop_pollinator_dependence"])
-        )
 
     header_check = [
         len(season_to_header[season]["biophysical"]) == 1,
@@ -2256,11 +2167,6 @@ def _parse_scenario_variables(
         f"Expected a single column name for all tables. {substrate_to_header[substrate]['biophysical']}, "
         f"{season_to_header[season]['biophysical']} "
     )
-    if yield_calc_bool:
-        header_check.append(
-            len(season_to_header[season]["crop_pollinator_dependence"]) == 1
-        )
-        assert_message += f"{season_to_header[season]['crop_pollinator_dependence']}"
 
     assert all(header_check), assert_message
 
@@ -2268,21 +2174,10 @@ def _parse_scenario_variables(
     substrate_to_header[substrate]["biophysical"] = substrate_to_header[substrate][
         "biophysical"
     ][0]
-    if yield_calc_bool:
-        season_to_header[season]["crop_pollinator_dependence"] = season_to_header[
-            season
-        ]["crop_pollinator_dependence"][0]
 
     # Check season_to_header for completeness
     for table_type, lookup_table in season_to_header.items():
-        if yield_calc_bool and len(lookup_table) != 3:
-            raise ValueError(
-                "Expected a two biophysical entries (floral, crop pollinator dependence) and a "
-                f"guild entry for '{table_type}' but instead found only {list(lookup_table.keys())}. "
-                f"Ensure there are corresponding entries of '{table_type}' in "
-                "both the guilds table and the biophysical table (for floral and crop pollinator dependence)."
-            )
-        elif len(lookup_table) != 2 and (
+        if len(lookup_table) != 2 and (
             "calculate_yield" not in args or not args["calculate_yield"]
         ):
             raise ValueError(
@@ -2388,22 +2283,17 @@ def _parse_scenario_variables(
             ][species]
 
     if yield_calc_bool:
-        # * crop_pollinator_dependence[season][landcover] (float)
+        # * crop_pollinator_dependence[landcover] (float)
         result["crop_pollinator_dependence"] = {
-            scenario_name: {season: {} for season in result["season_list"]}
-            for scenario_name in scenario_labels_list
+            scenario_name: {} for scenario_name in scenario_labels_list
         }
         for scenario_name in scenario_labels_list:
             for landcover_id, row in scenario_biophysical_df_dict[
                 scenario_name
             ].iterrows():
-                for season in result["season_list"]:
-                    crop_pollinator_dependence_header = season_to_header[season][
-                        "crop_pollinator_dependence"
-                    ]
-                    result["crop_pollinator_dependence"][scenario_name][season][
-                        landcover_id
-                    ] = row[crop_pollinator_dependence_header]
+                result["crop_pollinator_dependence"][scenario_name][landcover_id] = row[
+                    _CROP_POLLINATOR_DEPENDENCE_FIELD
+                ]
 
         # * half_saturation_coefficient[landcover] (float)
         result["half_saturation_coefficient"] = {
