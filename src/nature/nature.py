@@ -7,6 +7,7 @@ import shutil
 
 import requests
 import xmltodict
+from bs4 import BeautifulSoup
 
 import math
 import pandas as pd
@@ -22,11 +23,14 @@ from osgeo import gdal, osr
 import geopandas as gpd
 
 import pygeoprocessing
+from pygeoprocessing.geoprocessing_core import DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS
+import pygeoprocessing.kernels
 import natcap.invest.utils
 import natcap.invest.spec_utils
 import natcap.invest.validation
 
 from . import functions
+from . import rasterops
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -56,6 +60,10 @@ def message(*message_list):
     return " | ".join([str(message) for message in message_list])
 
 
+def strip_string(string):
+    return "".join([x if x.isalnum() else "_" if x == " " else "" for x in string])
+
+
 def scenario_labeling(
     args: dict,
     baseline_args: list,
@@ -83,6 +91,7 @@ def scenario_labeling(
         [
             f"scenario_{x}_list" in args
             and args[f"scenario_{x}_list"] is not None
+            and args[f"scenario_{x}_list"] != ""
             and len(args[f"scenario_{x}_list"]) > 0
             for x in baseline_args
         ]
@@ -90,7 +99,11 @@ def scenario_labeling(
         # Ensure all scenario args are in the args dict
         for baseline_arg in baseline_args:
             scenario_arg = f"scenario_{baseline_arg}_list"
-            if scenario_arg not in args or args[scenario_arg] is None:
+            if (
+                scenario_arg not in args
+                or args[scenario_arg] is None
+                or args[scenario_arg] == ""
+            ):
                 args[scenario_arg] = []
 
         # Used to check if any scenario args contain only one value. If so, we assume this value persists across all scenarios
@@ -134,11 +147,9 @@ def scenario_labeling(
 
         # Ensure scenario labels exist for all scenario args and if not, relabel them all
         scenario_name_list = [baseline_scenario_label] + args["scenario_labels_list"]
-        try:
-            len(scenario_name_list) == len(
-                scenario_items_dict[next(iter(scenario_items_dict))]
-            )
-        except:
+        if len(scenario_name_list) != len(
+            scenario_items_dict[next(iter(scenario_items_dict))]
+        ):
             logger.error(
                 f"Must provide the same number of scenario names ({len(scenario_name_list)-1}) as "
                 f"scenario args ({len(scenario_items_dict[next(iter(scenario_items_dict))])-1}). "
@@ -161,7 +172,7 @@ def scenario_labeling(
         # Return just the baseline args, but in the same format as the scenario args
         scenario_name_list = [baseline_scenario_label]
         scenario_args_dict = {
-            baseline_arg: {baseline_scenario_label: [args[baseline_arg]]}
+            baseline_arg: {baseline_scenario_label: args[baseline_arg]}
             for baseline_arg in baseline_args
         }
 
@@ -407,6 +418,88 @@ def get_mean_pixel_size_and_area(raster_path):
     return mean_pixel_size, pixel_area
 
 
+def flat_disk_kernel_raster(kernel_filepath: pathlike, max_distance: int):
+    """Create a flat disk  kernel.
+
+    The raster created will be a tiled GeoTiff, with 256x256 memory blocks.
+
+    Args:
+        kernel_filepath (pathlike): The path to the file on disk where this
+            kernel should be stored.  If this file exists, it will be
+            overwritten.
+        max_distance (int): The distance (in pixels) of the
+            kernel's radius.
+
+    Returns:
+        None
+
+    """
+    LOGGER.info(
+        f"Creating a disk kernel of distance {max_distance} at " f"{kernel_filepath}"
+    )
+    kernel_size = int(numpy.round(max_distance * 2 + 1))
+    kernel_filepath = str(kernel_filepath)
+
+    driver = gdal.GetDriverByName("GTiff")
+    kernel_dataset = driver.Create(
+        kernel_filepath.encode("utf-8"),
+        kernel_size,
+        kernel_size,
+        1,
+        gdal.GDT_Byte,
+        options=["BIGTIFF=IF_SAFER", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"],
+    )
+
+    # Make some kind of geotransform and SRS. It doesn't matter what, but
+    # having one will make GIS libraries behave better if it's all defined
+    kernel_dataset.SetGeoTransform([0, 1, 0, 0, 0, -1])
+    srs = osr.SpatialReference()
+    srs.SetWellKnownGeogCS("WGS84")
+    kernel_dataset.SetProjection(srs.ExportToWkt())
+
+    kernel_band = kernel_dataset.GetRasterBand(1)
+    kernel_band.SetNoDataValue(255)
+
+    cols_per_block, rows_per_block = kernel_band.GetBlockSize()
+
+    n_cols = kernel_dataset.RasterXSize
+    n_rows = kernel_dataset.RasterYSize
+
+    n_col_blocks = int(math.ceil(n_cols / float(cols_per_block)))
+    n_row_blocks = int(math.ceil(n_rows / float(rows_per_block)))
+
+    for row_block_index in range(n_row_blocks):
+        row_offset = row_block_index * rows_per_block
+        row_block_width = n_rows - row_offset
+        if row_block_width > rows_per_block:
+            row_block_width = rows_per_block
+
+        for col_block_index in range(n_col_blocks):
+            col_offset = col_block_index * cols_per_block
+            col_block_width = n_cols - col_offset
+            if col_block_width > cols_per_block:
+                col_block_width = cols_per_block
+
+            # Numpy creates index rasters as ints by default, which sometimes
+            # creates problems on 32-bit builds when we try to add Int32
+            # matrices to float64 matrices.
+            row_indices, col_indices = numpy.indices(
+                (row_block_width, col_block_width), dtype=float
+            )
+
+            row_indices += float(row_offset - max_distance)
+            col_indices += float(col_offset - max_distance)
+
+            kernel_index_distances = numpy.hypot(row_indices, col_indices)
+            kernel = kernel_index_distances < max_distance
+
+            kernel_band.WriteArray(kernel, xoff=col_offset, yoff=row_offset)
+
+    # Need to flush the kernel's cache to disk before opening up a new Dataset
+    # object in interblocks()
+    kernel_dataset.FlushCache()
+
+
 def logistic_decay_kernel_raster(
     kernel_path: pathlike,
     terminal_distance: int | float,
@@ -428,6 +521,8 @@ def logistic_decay_kernel_raster(
     Returns:
         None
     """
+    kernel_path = str(kernel_path)
+
     logger.debug("Creating logistic decay kernel")
     max_distance = terminal_distance + decay_start_distance
     kernel_size = int(np.round(max_distance * 2 + 1))
@@ -548,9 +643,10 @@ def convolve_2d_by_exponential(
         f"decay distance of {decay_kernel_distance}"
     )
     temporary_working_dir = Path(
-        tempfile.mkdtemp(dir=target_convolve_raster_path.parents[0])
+        tempfile.mkdtemp(dir=target_convolve_raster_path.parent)
     )
     exponential_kernel_path = temporary_working_dir / "exponential_decay_kernel.tif"
+    pygeoprocessing.kernels.exponential_decay_kernel()
     natcap.invest.utils.exponential_decay_kernel_raster(
         decay_kernel_distance, str(exponential_kernel_path)
     )
@@ -595,7 +691,7 @@ def convolve_2d_by_logistic(
         f"decay starting at {decay_start_distance} and terminating at {terminal_kernel_distance}"
     )
     temporary_working_dir = Path(
-        tempfile.mkdtemp(dir=target_convolve_raster_path.parents[0])
+        tempfile.mkdtemp(dir=target_convolve_raster_path.parent)
     )
     logistic_kernel_path = temporary_working_dir / "logistic_decay_kernel.tif"
     logistic_decay_kernel_raster(
@@ -610,6 +706,123 @@ def convolve_2d_by_logistic(
         mask_nodata=False,
     )
     shutil.rmtree(temporary_working_dir)
+
+
+# TODO create convolve by linear function
+def convolve_2d_by_flat(
+    signal_raster_path: pathlike,
+    target_convolve_raster_path: pathlike,
+    terminal_distance: int | float,
+    normalize: bool = True,
+    radial: bool = False,
+):
+    # TODO check with the software team to see how to do a focal stats density function
+    """Convolve signal by an flat kernal (either square or circular) with a
+    defined radial distance.
+
+    Args:
+
+        signal_rater_path (str): path to single band signal raster.
+        target_convolve_raster_path (str): path to convolved raster.
+        terminal_distance (int or float): The distance (in pixels) of the
+            kernel's radius, such that a 40-pixel distance creates an 80 by 80
+            square.
+        normalize (bool): Whether to normalize the kernel values to sum to 1.
+        radial (bool): Whether to create a radial kernel (True) or a square
+            (False, default).
+
+    Returns:
+        None.
+
+    """
+
+    # Ensure path arguments are Path objects
+    signal_raster_path = Path(signal_raster_path)
+    target_convolve_raster_path = Path(target_convolve_raster_path)
+
+    logger_message = (
+        f"Starting a {int(terminal_distance)}-pixel circular flat convolution over {signal_raster_path}"
+        if radial
+        else f"Starting a {int(terminal_distance)}-pixel flat square convolution over {signal_raster_path}"
+    )
+    logger.debug(logger_message)
+    temporary_working_dir = Path(
+        tempfile.mkdtemp(dir=target_convolve_raster_path.parent)
+    )
+    flat_kernel_path = temporary_working_dir / "flat_kernel.tif"
+    flat_kernel_raster(flat_kernel_path, terminal_distance, radial=radial)
+    pygeoprocessing.convolve_2d(
+        (str(signal_raster_path), 1),
+        (str(flat_kernel_path), 1),
+        str(target_convolve_raster_path),
+        working_dir=str(temporary_working_dir),
+        ignore_nodata_and_edges=True,
+        mask_nodata=False,
+        normalize_kernel=normalize,
+    )
+    shutil.rmtree(temporary_working_dir)
+
+
+def booleanize_raster(
+    input_raster: pathlike, output_raster: Path, raster_value_list: list
+):
+    """A function to reclassify a raster to boolean based on a list of raster values
+    to be considered True.
+
+    Args:
+        input_raster (pathlike): Path to the input raster
+        output_raster (pathlike): Path to the output raster
+        raster_value_list (list): List of raster values to reclassify to 1
+
+    Returns:
+        None
+    """
+    # Ensure path arguments are Path objects
+    input_raster = Path(input_raster)
+    output_raster = Path(output_raster)
+
+    logger.info(f"Reclassifying {input_raster.stem} to boolean")
+    raster_gdal = gdal.Open(str(input_raster))
+    raster_values = np.unique(np.array(raster_gdal.GetRasterBand(1).ReadAsArray()))
+
+    pygeoprocessing.reclassify_raster(
+        (str(input_raster), 1),
+        {code: (1 if code in raster_value_list else 0) for code in raster_values},
+        str(output_raster),
+        gdal.GDT_Byte,
+        0,
+    )
+
+
+def reclassify_raster_from_dataframe(
+    input_raster: pathlike,
+    output_raster: pathlike,
+    reclass_df: pd.DataFrame,
+    input_column: str,
+    output_column: str,
+):
+    # Ensure path arguments are Path objects
+    input_raster = Path(input_raster)
+    output_raster = Path(output_raster)
+
+    logger.info(f"Reclassifying {input_raster.stem}")
+    raster_gdal = gdal.Open(str(input_raster))
+    raster_values = np.unique(np.array(raster_gdal.GetRasterBand(1).ReadAsArray()))
+
+    reclass_df.set_index(input_column, inplace=True)
+
+    pygeoprocessing.reclassify_raster(
+        (str(input_raster), 1),
+        {
+            code: (
+                reclass_df[output_column][code] if code in reclass_df.index else code
+            )
+            for code in raster_values
+        },
+        str(output_raster),
+        pygeoprocessing.get_raster_info(str(input_raster))["datatype"],
+        pygeoprocessing.get_raster_info(str(input_raster))["nodata"][0],
+    )
 
 
 def extract_cdl(
@@ -633,10 +846,12 @@ def extract_cdl(
     r = requests.get(nass_xml_url)
 
     # Extract XML link from XML
-    nass_data_url = xmltodict.parse(r.content)["ns1:GetCDLFileResponse"]["returnURL"]
+    soup = BeautifulSoup(r.content, "xml")
+    nass_xml_return_url = soup.find("returnURL").text
+    # nass_xml_return_url = xmltodict.parse(r.content)["ns1:GetCDLFileResponse"]["returnURL"]  # Old method
 
     # Download CDL data to local file
-    r = requests.get(nass_data_url, allow_redirects=True)
+    r = requests.get(nass_xml_return_url, allow_redirects=True)
     outfile = temp_dir / f"CDL_{year}_{fips}.tif"
     with open(outfile, "wb") as cdl_out:
         cdl_out.write(r.content)
@@ -830,6 +1045,9 @@ def rename_invest_results(invest_model, invest_args, suffix):
         invest_info (dict): _description_
         suffix (str): String to append to the end of the file name.
     """
+    results_suffix = natcap.invest.utils.make_suffix_string(
+        invest_args, "results_suffix"
+    )
 
     # Modify relevant outputs
     # TODO Change pollination results to be dependent on pollinator species
@@ -837,24 +1055,28 @@ def rename_invest_results(invest_model, invest_args, suffix):
         result_file_list = [Path(invest_args["workspace_dir"]) / f"avg_pol_abd.tif"]
     elif invest_model == "pollination_mv":
         result_file_list = [
-            Path(invest_args["workspace_dir"]) / f"marginal_value_general.tif"
+            Path(invest_args["workspace_dir"])
+            / f"marginal_value_general{results_suffix}.tif"
         ]
     elif invest_model == "sdr":
         result_file_list = [
-            Path(invest_args["workspace_dir"]) / f"sed_export.tif",
-            Path(invest_args["workspace_dir"]) / f"watershed_results_sdr.shp",
+            Path(invest_args["workspace_dir"]) / f"sed_export{results_suffix}.tif",
+            Path(invest_args["workspace_dir"])
+            / f"watershed_results_sdr{results_suffix}.shp",
         ]
     elif invest_model == "ndr":
         result_file_list = [
-            Path(invest_args["workspace_dir"]) / f"n_total_export.tif",
-            Path(invest_args["workspace_dir"]) / f"p_surface_export.tif",
-            Path(invest_args["workspace_dir"]) / f"watershed_results_ndr.gpkg",
+            Path(invest_args["workspace_dir"]) / f"n_total_export{results_suffix}.tif",
+            Path(invest_args["workspace_dir"])
+            / f"p_surface_export{results_suffix}.tif",
+            Path(invest_args["workspace_dir"])
+            / f"watershed_results_ndr{results_suffix}.gpkg",
         ]
     elif invest_model == "carbon":
         result_file_list = [
-            Path(invest_args["workspace_dir"]) / f"tot_c_cur.tif",
-            Path(invest_args["workspace_dir"]) / f"tot_c_fut.tif",
-            Path(invest_args["workspace_dir"]) / f"delta_cur_fut.tif",
+            Path(invest_args["workspace_dir"]) / f"tot_c_cur{results_suffix}.tif",
+            Path(invest_args["workspace_dir"]) / f"tot_c_fut{results_suffix}.tif",
+            Path(invest_args["workspace_dir"]) / f"delta_cur_fut{results_suffix}.tif",
         ]
 
     for result_file in result_file_list:
@@ -865,15 +1087,38 @@ def rename_invest_results(invest_model, invest_args, suffix):
             )
 
 
-def clip_raster_by_vector(mask_path, raster_path, output_raster_path):
+def clip_raster_by_vector(
+    mask_path, raster_path, output_raster_path, field_filter: tuple = None
+):
     """Clip a raster by a vector mask.
 
     Args:
         mask_path (str): Path to the mask vector.
         raster_path (str): Path to the raster to be clipped.
         output_raster_path (str): Path to the output raster.
+        field_filter (tuple(str, list)): tuple of field string and value list
+            for filtering the vector
     """
     mask_gdf = gpd.read_file(mask_path)
+
+    clip_raster_by_gdf(mask_gdf, raster_path, output_raster_path, field_filter)
+
+
+def clip_raster_by_gdf(
+    mask_gdf, raster_path, output_raster_path, field_filter: tuple = None
+):
+    """Clip a raster by a vector gdf mask.
+
+    Args:
+        mask_gdf (GeoDataFrame): Geopandas GeoDataFrame.
+        raster_path (str): Path to the raster to be clipped.
+        output_raster_path (str): Path to the output raster.
+        field_filter (tuple(str, list)): tuple of field string and value list
+            for filtering the vector
+    """
+
+    if field_filter is not None:
+        mask_gdf = mask_gdf[mask_gdf[field_filter[0]].isin(field_filter[1])]
 
     with rio.open(raster_path) as src:
         mask_gdf = mask_gdf.to_crs(src.crs)
@@ -901,8 +1146,11 @@ def burn_polygon_add(
     burn_value: int | float,
     rasterio_dtype=rio.int8,
     nodata_val: int | float = None,
+    burn_add: bool = True,
     burn_attribute: str = None,
-    constraining_raster_value_tuple: tuple = None,
+    constraining_raster_value_tuple: typing.Tuple[
+        pathlike, typing.List[int | float]
+    ] = None,
 ):
     """Burns a polygon into a raster by adding a specified value.
 
@@ -914,12 +1162,15 @@ def burn_polygon_add(
         burn_value (int): Value to be burned into the raster.
         rasterio_dtype (rasterio.dtype, optional): Rasterio datatype to use for the output raster.
         nodata_val (int/float, optional): Value to use for nodata. If None, will use the nodata value of the base raster.
+        burn_add (bool, optional): Whether to add the burn value to the existing raster values. If False, will overwrite.
         burn_attribute (str, optional): Attribute to use for burning. If None, will burn all polygons with the same value.
-        constraining_raster_value_tuple (tuple, optional): Tuple of (pathlike, int/float) to use for constraining the output raster. If None, will not constrain.
+        constraining_raster_value_tuple (tuple, optional): Tuple of (pathlike, List[int/float])
+            to use for constraining the output raster. If None, will not constrain.
 
     Returns:
         None
     """
+    # TODO make a temp dir for the _burned_ raster
 
     # Make all path variables Path objects
     vector_path = Path(vector_path)
@@ -936,7 +1187,10 @@ def burn_polygon_add(
     # Dissolve vector to single feature to avoid overlapping polygons
     logger.debug(f"Dissolving burn vector")
     vector_gdf = gpd.read_file(vector_path)
-    vector_gdf = vector_gdf.dissolve()
+    if burn_attribute is not None:
+        vector_gdf = vector_gdf.dissolve(by=burn_attribute)
+    else:
+        vector_gdf = vector_gdf.dissolve()
     dissolved_vector_path = (
         intermediate_workspace_path / f"_dissolved_{vector_path.stem}.gpkg"
     )
@@ -963,6 +1217,9 @@ def burn_polygon_add(
     # Get raster info for intermediate raster
     target_raster_info = pygeoprocessing.get_raster_info(str(intermediate_raster_path))
 
+    # Set burn options
+    option_list = ["MERGE_ALG=ADD"] if burn_add else []
+
     # Burn and add vector to raster values
     logger.debug(f"Burning vector into raster")
     if burn_attribute is not None:
@@ -970,24 +1227,26 @@ def burn_polygon_add(
             str(dissolved_vector_path),
             str(intermediate_raster_path),
             burn_values=[burn_value],
-            option_list=["MERGE_ALG=ADD", f"ATTRIBUTE={burn_attribute}"],
+            option_list=option_list + [f"ATTRIBUTE={burn_attribute}"],
         )
     else:
         pygeoprocessing.rasterize(
             str(dissolved_vector_path),
             str(intermediate_raster_path),
             burn_values=[burn_value],
-            option_list=["MERGE_ALG=ADD"],
+            option_list=option_list,
         )
 
     # Constraining output by constraint raster, if called for
     if constraining_raster_value_tuple is not None:
         # Create constraining raster calculator function
         def _constrain_op(
-            base_array, change_array, constraining_array, constraining_value
+            base_array, change_array, constraining_array, *constraining_values
         ):
             out_array = np.where(
-                constraining_array == constraining_value, change_array, base_array
+                np.isin(constraining_array, constraining_values),
+                change_array,
+                base_array,
             )
 
             return out_array
@@ -998,13 +1257,16 @@ def burn_polygon_add(
             intermediate_workspace_path
             / f"_constrained_burned_{Path(base_raster_path).stem}.tif"
         )
+        constraint_value_list = [
+            (constraint, "raw") for constraint in constraining_raster_value_tuple[1]
+        ]
         pygeoprocessing.raster_calculator(
             [
                 (str(base_raster_path), 1),
                 (str(intermediate_raster_path), 1),
                 (str(constraining_raster_value_tuple[0]), 1),
-                (constraining_raster_value_tuple[1], "raw"),
-            ],
+            ]
+            + constraint_value_list,
             _constrain_op,
             str(constrained_raster_path),
             target_raster_info["datatype"],
@@ -1042,8 +1304,11 @@ def overlay_on_top_of_lulc(
     target_raster_path,
     burn_value: int | float = 1,
     nodata_val: int | float = None,
+    burn_add: bool = True,
     burn_attribute: str = None,
-    constraining_raster_value_tuple: tuple = None,
+    constraining_raster_value_tuple: typing.Tuple[
+        pathlike, typing.List[int | float]
+    ] = None,
 ):
     """Burns a polygon into a raster by adding a specified value, ensuring that the burn values are using digits unused in the base raster.
 
@@ -1054,13 +1319,21 @@ def overlay_on_top_of_lulc(
         target_raster_path (pathlike): Path to the output raster.
         burn_value (int): Value to be burned into the raster.
         nodata_val (int/float): Value to use for nodata. If None, will use the nodata value of the base raster.
+        burn_add (bool): Whether to add the burn value to the existing raster values. If False, will overwrite.
         burn_attribute (str): Attribute to use for burning. If None, will burn all polygons with the same value.
-        constraining_raster_value_tuple (tuple, optional): Tuple of (pathlike, int/float) to use for constraining the output raster. If None, will not constrain.
+        constraining_raster_value_tuple (tuple, optional): Tuple of (pathlike, List[int/float])
+            to use for constraining the output raster. If None, will not constrain.
     """
 
     # Extract maximum value of the raster to determine how many digits are needed
     with rio.open(base_lulc_path) as dataset:
         lulc_digits = len(str(int(dataset.statistics(1).max)))
+
+    base_nodata_val = (
+        pygeoprocessing.get_raster_info(str(base_lulc_path))["nodata"][0]
+        if nodata_val is None
+        else nodata_val
+    )
 
     # If an attribute is specified, dissolve the vector by that attribute and multiply the attribute values by 10**lulc_digits
     if burn_attribute is not None:
@@ -1075,12 +1348,12 @@ def overlay_on_top_of_lulc(
         vector_gdf.to_file(intermediate_vector_path)
         # Get the minimum raster datatype possible to house the digits required for this overlay
         rasterio_dtype = rio.dtypes.get_minimum_dtype(
-            [vector_gdf[burn_attribute].max(), nodata_val]
+            [vector_gdf[burn_attribute].max(), base_nodata_val]
         )
     else:
         intermediate_vector_path = vector_path
         rasterio_dtype = rio.dtypes.get_minimum_dtype(
-            [burn_value * 10**lulc_digits, nodata_val]
+            [burn_value * 10**lulc_digits, base_nodata_val]
         )
 
     burn_polygon_add(
@@ -1091,6 +1364,7 @@ def overlay_on_top_of_lulc(
         burn_value=burn_value,
         rasterio_dtype=rasterio_dtype,
         nodata_val=nodata_val,
+        burn_add=burn_add,
         burn_attribute=burn_attribute,
         constraining_raster_value_tuple=constraining_raster_value_tuple,
     )
@@ -1150,9 +1424,10 @@ def categorize_raster(
     raster_path: pathlike,
     output_raster_path: pathlike,
     category_bins: List[float],
-    category_labels: List[str],
+    category_string_labels: List[str],
     category_hex_colors: List[str],
     raster_band_label: str,
+    category_value_labels: List[int] = None,
 ) -> None:
     """Bin raster into a smaller number of integer classes and assign labels and colors to each class.
 
@@ -1162,19 +1437,29 @@ def categorize_raster(
         output_raster_path (str): path to output raster
         raster_band_label (int): band number of input raster to use
         category_bins (list): list of bin edges
-        category_labels (list): list of labels for each bin
+        category_string_labels (list): list of labels for each bin
         category_colors (list): list of colors for each bin
+        category_value_labels (list): (optional) list of values for each bin
 
     """
 
-    raster_type = rio.dtypes.get_minimum_dtype(len(category_labels) - 1)
-
-    input_nodata_val = pygeoprocessing.get_raster_info(str(raster_path))["nodata"][0]
+    if category_value_labels is None:
+        # Default to categories starting at 1
+        category_value_labels = [
+            i + 1 for i in list(range(len(category_string_labels)))
+        ]
+        raster_type = rio.dtypes.get_minimum_dtype(category_value_labels)
+        output_nodata_val = nodata_validation(raster_type, 0)
+    else:
+        input_nodata_val = pygeoprocessing.get_raster_info(str(raster_path))["nodata"][
+            0
+        ]
+        raster_type = rio.dtypes.get_minimum_dtype(category_value_labels)
+        output_nodata_val = nodata_validation(raster_type, input_nodata_val)
+        if output_nodata_val in category_value_labels:
+            logger.warning("Nodata value does not fit within raster value map.")
 
     # Check if input raster nodata value is within the range of the output raster type and adapt if necessary
-    output_nodata_val = nodata_validation(raster_type, input_nodata_val)
-    if output_nodata_val in range(len(category_labels)):
-        logger.warning("Nodata value does not fit within raster value map.")
 
     # Create constraining raster calculator function
     def _bin_op(array, bins):
@@ -1182,7 +1467,9 @@ def categorize_raster(
         valid_mask = ~natcap.invest.utils.array_equals_nodata(array, input_nodata_val)
         result = np.empty_like(array)
         result[:] = output_nodata_val
-        result[valid_mask] = np.array(pd.cut(array[valid_mask], bins, labels=False))
+        result[valid_mask] = np.array(
+            pd.cut(array[valid_mask], bins, labels=category_value_labels)
+        )
         return result
 
     # Replace values in intermediate raster with original raster values where constrained
@@ -1200,8 +1487,8 @@ def categorize_raster(
 
     assign_raster_labels_and_colors(
         output_raster_path,
-        list(range(len(category_labels))),
-        category_labels,
+        category_value_labels,
+        category_string_labels,
         category_hex_colors,
         raster_band_label,
     )
@@ -1269,19 +1556,32 @@ def assign_raster_labels_and_colors(
     del band, raster
 
 
-def make_scenario_suffix(file_suffix, scenario_suffix):
+def make_scenario_suffix(file_suffix: str, scenario_suffix: str = None) -> str:
     """Create a suffix for output files based on the file_suffix and scenario_suffix
-    in the following format: "_{file_suffix}_{scenario_suffix}" """
+    in the following format: "_{file_suffix}_{scenario_suffix}"
+
+    Args:
+        file_suffix (str): suffix to append to output files
+        scenario_suffix (str): suffix to append to output files
+
+    Returns:
+        str: suffix for output files
+    """
     if file_suffix != "" and not file_suffix.startswith("_"):
         file_suffix = "_" + file_suffix
     if (
-        scenario_suffix != ""
+        scenario_suffix is not None
+        and scenario_suffix != ""
         and not scenario_suffix.startswith("_")
         and not file_suffix.endswith("_")
     ):
         scenario_suffix = "_" + scenario_suffix
 
-    return f"{file_suffix}{scenario_suffix}"
+    return_suffix = (
+        file_suffix if scenario_suffix is None else file_suffix + scenario_suffix
+    )
+
+    return return_suffix
 
 
 def conditional_vector_project(
@@ -1316,105 +1616,62 @@ def conditional_vector_project(
     return target_path
 
 
-# def burn_polygon_add_constrained(
-#     vector_path,
-#     raster_path,
-#     constraining_raster_path,
-#     constraining_value,
-#     intermediate_workspace_path,
-#     output_raster_path,
-#     burn_value,
-#     target_nodata,
-#     rasterio_dtype=rio.int16,
-#     nodata_val: int | float = None,
-#     burn_attribute: str = None,
-#     coonstraining_raster_value_tuple: tuple = None,
-# ):
-#     """Burns a polygon into a raster by adding a specified value, but constrained by
-#     another boolean raster.
+def grouped_scalar_calculation(
+    base_raster_path: pathlike,
+    category_raster_path: pathlike,
+    target_raster_path: pathlike,
+    category_list: List[int],
+    scalar_list: List[int],
+) -> None:
+    """Raster calculator that multiplies some base raster by scalars associated with a
+    different raster's categories
 
-#     Args:
-#         vector_path (pathlike): Path to the vector to be burned.
-#         base_raster_path (pathlike): Path to the raster to be burned.
-#         constraining_raster_path (pathlike): Path to the raster to be used for constraining.
-#         constraining_value (int): Value to be used for constraining.
-#         intermediate_workspace_path (pathlike): Path to the intermediate workspace.
-#         target_raster_path (pathlike): Path to the output raster.
-#         burn_value (int): Value to be burned into the raster.
-#         rasterio_dtype (rasterio.dtype): Rasterio datatype to use for the output raster.
-#         nodata_val (int/float): Value to use for nodata. If None, will use the nodata value of the base raster.
-#         burn_attribute (str): Attribute to use for burning. If None, will burn all polygons with the same value.
+    Args:
+        base_raster_path (pathlike): Path to base raster to multiply
+        category_raster_path (pathlike): Path to raster with categories
+        target_raster_path (pathlike): Path to target raster
+        category_list (List[int]): List of categories in category raster
+        scalar_list (List[int]): List of scalars associated with categories
 
-#     """
+    Returns:
+        None
 
-#     # Make all path variables Path objects
-#     vector_path = Path(vector_path)
-#     raster_path = Path(raster_path)
-#     intermediate_workspace_path = Path(intermediate_workspace_path)
+    """
+    # Ensure path variables are Path objects
+    base_raster_path = Path(base_raster_path)
+    category_raster_path = Path(category_raster_path)
+    target_raster_path = Path(target_raster_path)
 
-#     # Dissolve vector to single feature to avoid overlapping polygons
-#     logger.debug(f"Dissolving burn vector")
-#     vector_gdf = gpd.read_file(vector_path)
-#     vector_gdf = vector_gdf.dissolve()
-#     dissolved_vector_path = (
-#         intermediate_workspace_path / f"_dissolved_{vector_path.stem}.gpkg"
-#     )
-#     vector_gdf.to_file(dissolved_vector_path)
+    temporary_working_dir = Path(tempfile.mkdtemp(dir=target_raster_path.parent))
 
-#     # Copy raster to different datatype to accommodate new integer values
-#     intermediate_raster_path = (
-#         intermediate_workspace_path / f"_burned_{Path(raster_path).stem}.tif"
-#     )
-#     if nodata_val is not None:
-#         copy_raster_to_new_datatype(
-#             raster_path,
-#             intermediate_raster_path,
-#             rasterio_dtype=rasterio_dtype,
-#             nodata_val=nodata_val,
-#         )
-#     else:
-#         copy_raster_to_new_datatype(
-#             raster_path,
-#             intermediate_raster_path,
-#             rasterio_dtype=rasterio_dtype,
-#         )
+    base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
+    base_raster_nodata = base_raster_info["nodata"][0]
+    cell_size = np.min(np.abs(base_raster_info["pixel_size"]))
 
-#     # Burn and add vector to raster values
-#     logger.debug(f"Burning vector into raster")
-#     if burn_attribute is not None:
-#         pygeoprocessing.rasterize(
-#             str(dissolved_vector_path),
-#             str(intermediate_raster_path),
-#             burn_values=[burn_value],
-#             option_list=["MERGE_ALG=ADD", f"ATTRIBUTE={burn_attribute}"],
-#         )
-#     else:
-#         pygeoprocessing.rasterize(
-#             str(dissolved_vector_path),
-#             str(intermediate_raster_path),
-#             burn_values=[burn_value],
-#             option_list=["MERGE_ALG=ADD"],
-#         )
+    category_raster_nodata = pygeoprocessing.get_raster_info(str(category_raster_path))[
+        "nodata"
+    ][0]
 
-#     # Create constraining raster calculator function
-#     def _constrain_op(base_array, change_array, constraining_array, constraining_value):
-#         out_array = np.where(
-#             constraining_array == constraining_value, change_array, base_array
-#         )
+    # Calculate kWh map
+    grouped_scalar_op = rasterops.MultiplyRasterByScalarList(
+        category_list, scalar_list, base_raster_nodata, category_raster_nodata
+    )
 
-#         return out_array
+    temp_base_path = temporary_working_dir / Path(base_raster_path).name
+    temp_category_path = temporary_working_dir / Path(category_raster_path).name
 
-#     # Replace values in intermediate raster with original raster values where constrained
-#     logger.debug(f"Constraining burn by raster")
-#     pygeoprocessing.raster_calculator(
-#         [
-#             (str(raster_path), 1),
-#             (str(intermediate_raster_path), 1),
-#             (str(constraining_raster_path), 1),
-#             (constraining_value, "raw"),
-#         ],
-#         _constrain_op,
-#         str(output_raster_path),
-#         gdal.GDT_Int16,
-#         target_nodata,
-#     )
+    pygeoprocessing.align_and_resize_raster_stack(
+        [str(base_raster_path), str(category_raster_path)],
+        [str(temp_base_path), str(temp_category_path)],
+        ["near", "near"],
+        (cell_size, -cell_size),
+        "intersection",
+    )
+
+    pygeoprocessing.raster_calculator(
+        [(str(temp_base_path), 1), (str(temp_category_path), 1)],
+        grouped_scalar_op,
+        str(target_raster_path),
+        gdal.GDT_Float32,
+        base_raster_nodata,
+    )

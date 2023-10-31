@@ -39,6 +39,36 @@ class MultiplyRasters(object):
         return result
 
 
+class SubtractTwoRasters(object):
+    """Subtract two rasters, removing nodata."""
+
+    def __init__(self, nodata_val):
+        self.nodata = nodata_val
+        # try to get the source code of __call__ so task graph will recompute
+        # if the function has changed
+        try:
+            self.__name__ = hashlib.sha1(
+                inspect.getsource(SubtractTwoRasters.__call__).encode("utf-8")
+            ).hexdigest()
+        except IOError:
+            # default to the classname if it doesn't work
+            self.__name__ = SubtractTwoRasters.__name__
+
+    def __call__(self, array1, array2):
+        """Subtract two rasters and account for nodata."""
+        valid_mask = np.ones(array1.shape, dtype=bool)
+        result = np.empty_like(array1)
+        result[:] = self.nodata
+
+        valid_mask = ~natcap.invest.utils.array_equals_nodata(
+            array1, self.nodata
+        ) & ~natcap.invest.utils.array_equals_nodata(array2, self.nodata)
+
+        result[valid_mask] = array1[valid_mask] - array2[valid_mask]
+
+        return result
+
+
 class SumRasters(object):
     """Sum all rasters where nodata is 0 unless the entire stack is nodata."""
 
@@ -136,11 +166,61 @@ class MultiplyRasterByScalar(object):
         return result
 
 
+class MultiplyRasterByScalarList(object):
+    """Calculate raster[idx] * scalar[idx] for each idx in the paired lists."""
+
+    def __init__(self, category_list, scalar_list, base_nodata, category_nodata):
+        """Create a closure for multiplying an array by a scalar.
+
+        Args:
+            scalar (float): value to use in `__call__` when multiplying by
+                its parameter.
+
+        Returns:
+            None.
+        """
+        self.category_list = category_list
+        self.scalar_list = scalar_list
+        self.base_nodata = base_nodata
+        self.category_nodata = category_nodata
+        # try to get the source code of __call__ so task graph will recompute
+        # if the function has changed
+        try:
+            self.__name__ = hashlib.sha1(
+                inspect.getsource(MultiplyRasterByScalarList.__call__).encode("utf-8")
+            ).hexdigest()
+        except IOError:
+            # default to the classname if it doesn't work
+            self.__name__ = MultiplyRasterByScalarList.__name__
+
+    def __call__(self, base_array, category_array):
+        result = np.empty_like(base_array)
+        result[:] = self.base_nodata
+
+        # Create valid mask
+        valid_mask = ~natcap.invest.utils.array_equals_nodata(
+            base_array, self.base_nodata
+        ) & ~natcap.invest.utils.array_equals_nodata(
+            category_array, self.category_nodata
+        )
+
+        # Multiply masked raster by category and associated scalar
+        for category, scalar in zip(self.category_list, self.scalar_list):
+            # Mask by category
+            current_mask = np.logical_and(valid_mask, (category_array == category))
+
+            base_array_masked = base_array[current_mask]
+            result[current_mask] = base_array_masked * scalar
+
+        return result
+
+
 class SumRastersByScalar(object):
     """Sum all rasters where nodata is 0 unless the entire stack is nodata."""
 
-    def __init__(self, scalars, nodata_val):
+    def __init__(self, scalars, array_nodata, nodata_val):
         self.scalars = scalars
+        self.array_nodata = array_nodata
         self.nodata = nodata_val
         # try to get the source code of __call__ so task graph will recompute
         # if the function has changed
@@ -157,9 +237,11 @@ class SumRastersByScalar(object):
         valid_mask = np.zeros(array_list[0].shape, dtype=bool)
         result = np.empty_like(array_list[0])
         result[:] = 0
-        for scalar, array in zip(self.scalars, array_list):
+        for scalar, array, array_nodata in zip(
+            self.scalars, array_list, self.array_nodata
+        ):
             local_valid_mask = ~natcap.invest.utils.array_equals_nodata(
-                array, self.nodata
+                array, array_nodata
             )
             result[local_valid_mask] += array[local_valid_mask] * scalar
             valid_mask |= local_valid_mask  # Only ALL nodata makes the result nodata

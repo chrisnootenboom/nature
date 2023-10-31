@@ -11,3 +11,6 @@ def _read_csv(filename):
 
 
 BIVARIATE_COLORMAP = _read_csv("/colormaps/bivariate.csv")
+
+# TODO actually make the colors for trivariate (if that is even possible)
+TRIVARIATE_COLORMAP = _read_csv("/colormaps/trivariate.csv")

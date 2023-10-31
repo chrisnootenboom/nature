@@ -4,14 +4,14 @@ import logging
 import numpy as np
 import collections
 import re
-import itertools
 from pathlib import Path
 from osgeo import gdal, ogr
 
-from natcap.invest import utils, spec_utils, pollination
+from natcap.invest import utils, spec_utils
 from natcap.invest.unit_registry import u
 import pygeoprocessing
 import taskgraph
+
 from .. import nature
 from .. import rasterops
 from .model_metadata import NCI_METADATA
@@ -25,7 +25,7 @@ handler.setFormatter(formatter)
 LOGGER.addHandler(handler)
 LOGGER.setLevel(logging.DEBUG)
 
-# TODO update this to the actual model spec
+# TODO update MODEL_SPEC to the actual model spec
 MODEL_SPEC = {
     "model_name": NCI_METADATA["pollination_mv"].model_title,
     "pyname": NCI_METADATA["pollination_mv"].pyname,
@@ -86,7 +86,6 @@ MODEL_SPEC = {
             "type": "csv",
             "index_col": "lucode",
             "columns": {
-                # TODO Add new columns
                 "lucode": spec_utils.LULC_TABLE_COLUMN,
                 "nesting_[SUBSTRATE]_availability_index": {
                     "type": "ratio",
@@ -105,72 +104,45 @@ MODEL_SPEC = {
                     "Guild Table, so that there is a column for each "
                     "season.",
                 },
+                "crop_pollinator_dependence_index": {
+                    "type": "ratio",
+                    "about": "The percentage of the LULC class' crop yield that "
+                    "requires pollination. This is typically 0 for all non-agricultural "
+                    "LULC classes.",
+                },
+                "half_saturation_coefficient": {
+                    "type": "ratio",
+                    "about": "The half saturation coefficient for LULC class. This "
+                    "is the pollinator abundance needed to reach half of the total "
+                    "potential pollinator-dependent yield.",
+                },
+                "value_per_hectare": {
+                    "type": "ratio",
+                    "about": "The economic value of the crop type per hectare, assuming "
+                    "it achieves its full yield potential.",
+                },
             },
-            "about": "A table mapping each LULC class to nesting availability and "
-            "floral abundance data for each substrate and season in that "
-            "LULC class. All values in the LULC raster must have "
-            "corresponding entries in this table.",
-            "name": "biophysical table",
         },
-        # TODO change farm vector stuff, once we know what we want from the farm vector
-        "farm_vector_path": {
+        # TODO change  vector stuff, once we know what we want from the vector
+        "ownership_vector_path": {
             "type": "vector",
             "fields": {
-                "crop_type": {
-                    "type": "freestyle_string",
-                    "about": "Name of the crop grown on each polygon, e.g. "
-                    "'blueberries', 'almonds', etc.",
-                },
-                "half_sat": {
-                    "type": "ratio",
-                    "about": "The half saturation coefficient for the crop grown "
-                    "in this area. This is the wild pollinator abundance "
-                    "(i.e. the proportion of all pollinators that are "
-                    "wild) needed to reach half of the total potential "
-                    "pollinator-dependent yield.",
-                },
-                "season": {
-                    "type": "freestyle_string",
-                    "about": "The season in which the crop is pollinated. Season "
-                    "names must match those in the Guild Table and "
-                    "Biophysical Table.",
-                },
-                "fr_[SEASON]": {  # floral resources for each season
-                    "type": "ratio",
-                    "about": "The floral resources available at this farm for the "
-                    "given season. Replace [SEASON] with season names "
-                    "matching those in the Guild Table and Biophysical "
-                    "Table, so that there is one field for each season.",
-                },
-                "n_[SUBSTRATE]": {  # nesting availabilities for each substrate
-                    "type": "ratio",
-                    "about": "The nesting suitability for the given substrate at "
-                    "this farm. given substrate. Replace [SUBSTRATE] with "
-                    "substrate names matching those in the Guild Table "
-                    "and Biophysical Table, so that there is one field "
-                    "for each substrate.",
-                },
-                "p_dep": {
-                    "type": "ratio",
-                    "about": "The proportion of crop dependent on pollinators.",
-                },
-                "p_managed": {
-                    "type": "ratio",
-                    "about": "The proportion of pollination required on the farm "
-                    "that is provided by managed pollinators.",
+                "landowner": {
+                    "type": "text",
+                    "about": "An text field that identifies the owner of each parcel. ",
                 },
             },
             "geometries": spec_utils.POLYGONS,
             "required": False,
-            "about": "Map of farm sites to be analyzed, with pollination data "
-            "specific to each farm.",
-            "name": "farms map",
+            "about": "Map of ownership parcels to be analyzed, with ownership data "
+            "specific to each parcel.",
+            "name": "ownership map",
         },
     },
     "outputs": {
         # TODO Update this to the actual outputs
         "farm_results.shp": {
-            "created_if": "farm_vector_path",
+            "created_if": "ownership_vector_path",
             "about": "A copy of the input farm polygon vector file with additional fields",
             "geometries": spec_utils.POLYGONS,
             "fields": {
@@ -205,7 +177,7 @@ MODEL_SPEC = {
             },
         },
         "farm_pollinators.tif": {
-            "created_if": "farm_vector_path",
+            "created_if": "ownership_vector_path",
             "about": "Total pollinator abundance across all species per season, "
             "clipped to the geometry of the farm vector’s polygons.",
             "bands": {1: {"type": "ratio"}},
@@ -223,18 +195,18 @@ MODEL_SPEC = {
             "bands": {1: {"type": "ratio"}},
         },
         "total_pollinator_abundance_[SEASON].tif": {
-            "created_if": "farm_vector_path",
+            "created_if": "ownership_vector_path",
             "about": "Total pollinator abundance across all species per season.",
             "bands": {1: {"type": "ratio"}},
         },
         "total_pollinator_yield.tif": {
-            "created_if": "farm_vector_path",
+            "created_if": "ownership_vector_path",
             "about": "Total pollinator yield index for pixels that overlap farms, "
             "including wild and managed pollinators.",
             "bands": {1: {"type": "ratio"}},
         },
         "wild_pollinator_yield.tif": {
-            "created_if": "farm_vector_path",
+            "created_if": "ownership_vector_path",
             "about": "Pollinator yield index for pixels that overlap farms, for "
             "wild pollinators only.",
             "bands": {1: {"type": "ratio"}},
@@ -312,7 +284,7 @@ MODEL_SPEC = {
 }
 
 # Rebuild of InVEST Pollinator model
-_INDEX_NODATA = -1.0
+_INDEX_NODATA = -999.0
 
 BASELINE_SCENARIO_LABEL = "baseline"
 
@@ -333,14 +305,15 @@ _EXPECTED_BIOPHYSICAL_HEADERS = [
 ]
 
 # These are patterns expected in the guilds table
-_NESTING_SUITABILITY_PATTERN = "nesting_suitability_([^_]+)_index"
+_NESTING_SUITABILITY_PATTERN = "nesting_suitability_%s_index"
+_NESTING_SUITABILITY_RE_PATTERN = _NESTING_SUITABILITY_PATTERN % "([^_]+)"
 # replace with season
 _FORAGING_ACTIVITY_PATTERN = "foraging_activity_%s_index"
 _FORAGING_ACTIVITY_RE_PATTERN = _FORAGING_ACTIVITY_PATTERN % "([^_]+)"
 _RELATIVE_SPECIES_ABUNDANCE_FIELD = "relative_abundance"
 _ALPHA_HEADER = "alpha"
 _EXPECTED_GUILD_HEADERS = [
-    _NESTING_SUITABILITY_PATTERN,
+    _NESTING_SUITABILITY_RE_PATTERN,
     _FORAGING_ACTIVITY_RE_PATTERN,
     _ALPHA_HEADER,
     _RELATIVE_SPECIES_ABUNDANCE_FIELD,
@@ -357,6 +330,8 @@ _EXPECTED_BIOPHYSICAL_YIELD_HEADERS = [
     _HALF_SATURATION_FIELD,
     _CROP_VALUE_FIELD,
 ]
+
+_PROJECTED_OWNERSHIP_VECTOR_FILE_PATTERN = "reprojected_ownership_vector%s.gpkg"
 
 
 # File patterns
@@ -391,17 +366,17 @@ _SPECIES_LANDSCAPE_SCORE_FILE_PATTERN = "pollinator_landscape_score_%s%s.tif"
 # expected pollinator visitation index for species replaced by (species, file_suffix)
 _SPECIES_POLLINATOR_VISITATION_FILE_PATTERN = "pollinator_visitation_index_%s%s.tif"
 # marginal value for species replaced by (species, file_suffix)
-_SPECIES_MARGINAL_VALUE_FILE_PATTERN = "marginal_value_%s%s.tif"
+_SPECIES_D_POLLINATOR_LANDSCAPE_SCORE = "d_pollinator_landscape_score_%s%s.tif"
 # marginal value replaced by file_suffix
-_MARGINAL_VALUE_FILE_PATTERN = "marginal_value_%s.tif"
+_D_POLLINATOR_LANDSCAPE_SCORE = "d_pollinator_landscape_score_%s.tif"
 
 # FIle patterns for
 # expected pollinator visitation index  replaced by (file_suffix)
 _TOTAL_POLLINATOR_VISITATION_FILE_PATTERN = "total_pollinator_visitation_index_%s.tif"
 
 
-# pollinator dependence raster replace (season, file_suffix)
-_CROP_POLLINATOR_DEPENDENCE_FILE_PATTERN = "crop_pollinator_dependence_%s%s.tif"
+# pollinator dependence raster replace (file_suffix)
+_CROP_POLLINATOR_DEPENDENCE_FILE_PATTERN = "crop_pollinator_dependence_%s.tif"
 # half saturation raster replace (file_suffix)
 _HALF_SATURATION_FILE_PATTERN = "half_saturation_%s.tif"
 # crop value raster replace (file_suffix)
@@ -422,7 +397,40 @@ _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_FILE_PATTERN = (
 # change in crop yield raster replace (season, file_suffix)
 _DELTA_ANNUAL_YIELD_FILE_PATTERN = "d_annual_yield_%s.tif"
 # change in realized value of crop yield replace (season, file_suffix)
-_DELTA_ANNUAL_YIELD_VALUE_FILE_PATTERN = "d_yield_value_%s.tif"
+_DELTA_ANNUAL_YIELD_VALUE_FILE_PATTERN = "d_annual_yield_value_%s.tif"
+
+# change in crop yield raster replace (file_suffix)
+_DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN = (
+    "d_annual_yield_d_pollinator_visitation_%s%s.tif"
+)
+_OWNERSHIP_FILE_PATTERN = "ownership_%s%s.gpkg"
+# change in crop yield raster replace (season, file_suffix)
+_DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_BY_OWNERSHIP_FILE_PATTERN = (
+    "d_annual_yield_d_pollinator_landscape_score_%s%s.tif"
+)
+# change in crop yield raster replace (owner, file_suffix)
+_DELTA_ANNUAL_YIELD_BY_OWNERSHIP_FILE_PATTERN = "d_annual_yield_%s%s.tif"
+# change in realized value of crop yield replace (owner, file_suffix)
+_DELTA_ANNUAL_YIELD_VALUE_BY_OWNERSHIP_FILE_PATTERN = "d_annual_yield_value_%s%s.tif"
+
+# change in realized value of crop yield replace (file_suffix)
+_DELTA_ANNUAL_YIELD_VALUE_PRIVATE_FILE_PATTERN = "d_annual_yield_value_private_%s.tif"
+# change in realized value of crop yield replace (file_suffix)
+_DELTA_ANNUAL_YIELD_VALUE_EXTERNALITY_FILE_PATTERN = (
+    "d_annual_yield_value_externality_%s.tif"
+)
+
+# ownership vector stuff
+_OWNERSHIP_FIELD = "landowner"
+_EXPECTED_OWNERSHIP_HEADERS = [_OWNERSHIP_FIELD]
+
+# Intermediate file directories
+_INTERMEDIATE_OUTPUT_DIR = "intermediate_outputs"
+_OWNERSHIP_OUTPUT_DIR = "ownership_outputs"
+_SPECIES_SEASON_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/species_season_intermediates"
+_SPECIES_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/species_intermediates"
+_SEASON_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/season_intermediates"
+_OWNERSHIP_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/ownership_intermediates"
 
 
 def execute(args):
@@ -433,6 +441,9 @@ def execute(args):
             Will overwrite any files that exist if the path already exists.
         args['results_suffix'] (string): string appended to each output
             file path.
+        args['n_workers'] (int): (optional) The number of worker processes to
+            use for processing this model.  If omitted, computation will take
+            place in the current process.
         args['landcover_raster_path'] (string): file path to a landcover
             raster.
         args['guild_table_path'] (string): file path to a table indicating
@@ -441,7 +452,7 @@ def execute(args):
                 * 'species': a bee species whose column string names will
                     be referred to in other tables and the model will output
                     analyses per species.
-                * one or more columns matching _NESTING_SUITABILITY_PATTERN
+                * one or more columns matching _NESTING_SUITABILITY_RE_PATTERN
                     with values in the range [0.0, 1.0] indicating the
                     suitability of the given species to nest in a particular
                     substrate.
@@ -467,7 +478,7 @@ def execute(args):
             Columns in the table must be at least
                 * 'lucode': representing all the unique landcover codes in
                     the raster ast `args['landcover_path']`
-                * For every nesting matching _NESTING_SUITABILITY_PATTERN
+                * For every nesting matching _NESTING_SUITABILITY_RE_PATTERN
                   in the guild stable, a column matching the pattern in
                   `_LANDCOVER_NESTING_INDEX_HEADER`.
                 * For every season matching _FORAGING_ACTIVITY_RE_PATTERN
@@ -484,37 +495,68 @@ def execute(args):
             identical in resolution and extent to `args['landcover_raster_path']`.
         args['calculate_yield'] (bool): (optional) If True, calculate the marginal
             change in pollinator-dependent agriculture.
-        args['farm_vector_path'] (string): (optional) path to a vector of farm locations.
+        args['ownership_vector_path'] (string): (optional) path to a vector of ownership parcels.
         args['aggregate_size'] (int): (optional) A rescaling factor used to
             aggregate all rasters to ease convolution calculations.
-        args['n_workers'] (int): (optional) The number of worker processes to
-            use for processing this model.  If omitted, computation will take
-            place in the current process.
+
+
+        Args for easy copying:
+        "workspace_dir": "",
+        "results_suffix": "",
+        "n_workers": -1,
+        "landcover_raster_path": "",
+        "guild_table_path": "",
+        "landcover_biophysical_table_path": "",
+        "scenario_labels_list": [],
+        "scenario_landcover_biophysical_table_path_list": [],
+        "scenario_landcover_raster_path_list": [],
+        "calculate_yield": False,
+        "ownership_vector_path": "",
+        "aggregate_size": None,
 
     Returns:
         None
     """
     LOGGER.info("Starting NCI Pollinator model")
 
+    ownership_bool = (
+        "ownership_vector_path" in args and args["ownership_vector_path"] != ""
+    )
+
     # create initial working directories and determine file suffixes
     output_dir = Path(args["workspace_dir"])
-    intermediate_output_dir = output_dir / "intermediate_outputs"
-    species_season_dir = intermediate_output_dir / "species_season_outputs"
-    species_dir = intermediate_output_dir / "species_outputs"
-    season_dir = intermediate_output_dir / "season_outputs"
+    intermediate_output_dir = output_dir / _INTERMEDIATE_OUTPUT_DIR
+    ownership_output_dir = output_dir / _OWNERSHIP_OUTPUT_DIR
+    species_season_dir = output_dir / _SPECIES_SEASON_DIR
+    species_dir = output_dir / _SPECIES_DIR
+    season_dir = output_dir / _SEASON_DIR
+    ownership_dir = output_dir / _OWNERSHIP_DIR
 
     work_token_dir = intermediate_output_dir / "_taskgraph_working_dir"
 
-    utils.make_directories(
-        [
-            output_dir,
-            intermediate_output_dir,
-            species_season_dir,
-            season_dir,
-            work_token_dir,
-        ]
-    )
-    file_suffix = utils.make_suffix_string(args, "results_suffix")
+    if ownership_bool:
+        utils.make_directories(
+            [
+                output_dir,
+                intermediate_output_dir,
+                species_season_dir,
+                season_dir,
+                work_token_dir,
+                ownership_dir,
+                ownership_output_dir,
+            ]
+        )
+    else:
+        utils.make_directories(
+            [
+                output_dir,
+                intermediate_output_dir,
+                species_season_dir,
+                season_dir,
+                work_token_dir,
+            ]
+        )
+    basic_file_suffix = utils.make_suffix_string(args, "results_suffix")
 
     landcover_raster_info = pygeoprocessing.get_raster_info(
         str(args["landcover_raster_path"])
@@ -535,20 +577,50 @@ def execute(args):
         BASELINE_ARGS,
         baseline_scenario_label=BASELINE_SCENARIO_LABEL,
     )
+    LOGGER.debug(scenario_labels_list)
+
+    run_scenario_analysis = len(scenario_labels_list) > 1
 
     # Test if required yield parameters are present, if yield is to be calculated
-    # TODO figure out if we need a farm_vector_path
     # if "calculate_yield" in args and args["calculate_yield"]:
-    #     # Check if farm vector is present
+    #     # Check if ownership vector is present
     #     try:
-    #         args["farm_vector_path"]
+    #         args["ownership_vector_path"]
     #     except:
-    #         LOGGER.error(f"Must provide a farm vector path if calculating yield.")
+    #         LOGGER.error(f"Must provide an ownership vector path if calculating yield.")
+
+    if ownership_bool:
+        # we set the vector path to be the projected vector that we'll create
+        # later, and create rasterization task list
+        ownership_vector_path = ownership_dir / (
+            _PROJECTED_OWNERSHIP_VECTOR_FILE_PATTERN % basic_file_suffix
+        )
+        ownership_mask_task_list = {}
+    else:
+        ownership_vector_path = None
+
+    if ownership_vector_path is not None:
+        # ensure ownership vector is in the same projection as the landcover map
+        LOGGER.info("Reprojecting ownership vector to match landcover map")
+        reproject_ownership_task = task_graph.add_task(
+            task_name="reproject_ownership_task",
+            func=pygeoprocessing.reproject_vector,
+            args=(
+                str(args["ownership_vector_path"]),
+                landcover_raster_info["projection_wkt"],
+                str(ownership_vector_path),
+            ),
+            kwargs={
+                "driver_name": "GPKG",
+            },
+            target_path_list=[str(ownership_vector_path)],
+        )
 
     # Create taskgraph task dictionaries
     landcover_substrate_index_task_map = {name: {} for name in scenario_labels_list}
     habitat_nesting_task_map = {name: {} for name in scenario_labels_list}
     seasonal_floral_abundance_task_map = {name: {} for name in scenario_labels_list}
+    alpha_kernel_raster_task_map = {name: {} for name in scenario_labels_list}
     perceived_seasonal_floral_index_task_map = {
         name: {} for name in scenario_labels_list
     }
@@ -569,8 +641,8 @@ def execute(args):
     total_pollinator_visitation_task_map = {name: {} for name in scenario_labels_list}
 
     # parse out the scenario variables from a complicated set of two tables
-    # and possibly a farm polygon.  This function will also raise an exception
-    # if any of the inputs are malformed.
+    # and possibly an ownership parcel polygon.  This function will also raise
+    # an exception if any of the inputs are malformed.
     scenario_filepath_list = [
         "nesting_substrate_index_path",
         "habitat_nesting_index_path",
@@ -588,10 +660,80 @@ def execute(args):
         args, scenario_labels_list, scenario_args_dict, scenario_filepath_list
     )
 
+    if "calculate_yield" in args and args["calculate_yield"]:
+        # Create additional scenario_variable dictionaries
+        for scenario_variable_list in [
+            "crop_pollinator_dependence_raster_path",
+            "half_saturation_coefficient_raster_path",
+            "crop_value_raster_path",
+            "annual_yield_raster_path",
+            "annual_yield_value_raster_path",
+            # Marginal Value variables
+            "delta_annual_yield_by_visitation_raster_path",
+            "delta_annual_yield_by_landscape_score_raster_path",
+            "delta_annual_yield_raster_path",
+            "delta_annual_yield_value_raster_path",
+            # Ownership variables
+            "delta_annual_yield_by_visitation_by_ownership_raster_path",
+            "delta_annual_yield_by_landscape_score_by_ownership_raster_path",
+            "delta_annual_yield_by_ownership_raster_path",
+            "delta_annual_yield_value_by_ownership_raster_path",
+            "delta_annual_yield_value_private_raster_path",
+            "delta_annual_yield_value_externality_raster_path",
+        ]:
+            scenario_variables[scenario_variable_list] = {
+                name: {} for name in scenario_labels_list
+            }
+
+        for scenario_warp_variable_list in [
+            "crop_dependence",
+            "half_saturation",
+            "crop_value",
+        ]:
+            warp_rasters_task_map[scenario_warp_variable_list] = {
+                name: {} for name in scenario_labels_list
+            }
+
+        # Create taskgraph task dictionaries
+        crop_pollinator_dependence_tasks = {name: {} for name in scenario_labels_list}
+        half_saturation_tasks = {name: {} for name in scenario_labels_list}
+        crop_value_tasks = {name: {} for name in scenario_labels_list}
+        annual_yield_tasks = {name: {} for name in scenario_labels_list}
+        annual_yield_value_tasks = {name: {} for name in scenario_labels_list}
+        delta_annual_yield_by_visitation_tasks = {
+            name: {} for name in scenario_labels_list
+        }
+        delta_annual_yield_by_landscape_score_tasks = {
+            name: {} for name in scenario_labels_list
+        }
+        delta_annual_yield_tasks = {name: {} for name in scenario_labels_list}
+        delta_annual_yield_value_tasks = {name: {} for name in scenario_labels_list}
+
+        # Ownership task dictionaries
+        delta_annual_yield_by_landscape_score_by_ownership_tasks = {
+            name: {} for name in scenario_labels_list
+        }
+        delta_annual_yield_by_ownership_tasks = {
+            name: {} for name in scenario_labels_list
+        }
+        delta_annual_yield_value_by_ownership_tasks = {
+            name: {} for name in scenario_labels_list
+        }
+        delta_annual_yield_value_private_tasks = {
+            name: {} for name in scenario_labels_list
+        }
+        delta_annual_yield_externality_tasks = {
+            name: {} for name in scenario_labels_list
+        }
+
     # Iterate through scenarios (even if there is only one)
     for scenario_name in scenario_labels_list:
         # Create scenario suffix
-        file_suffix = nature.make_scenario_suffix(args["results_suffix"], scenario_name)
+        file_suffix = (
+            nature.make_scenario_suffix(args["results_suffix"], scenario_name)
+            if run_scenario_analysis
+            else basic_file_suffix
+        )
         # Reclass LULC to Nesting (by substrate)
         # calculate nesting_substrate_index[substrate] substrate maps
         # N(x, n) = ln(l(x), n)
@@ -799,7 +941,7 @@ def execute(args):
             ] = perceived_annual_floral_index_path
 
         # Aggregate raster data if necessary
-        if args["aggregate_size"] is not None:
+        if args["aggregate_size"] not in [None, ""]:
             LOGGER.info(
                 f"{scenario_name} | Aggregating forage and nesting resource rasters"
             )
@@ -812,7 +954,7 @@ def execute(args):
                 ][species]
                 scenario_variables["habitat_nesting_index_path"][scenario_name][
                     species
-                ] = h_nesting.replace(".tif", "_aggregated.tif")
+                ] = h_nesting.with_stem(h_nesting.stem + "_aggregated")
                 warp_rasters_task_map["habitat_nesting"][scenario_name][
                     species
                 ] = task_graph.add_task(
@@ -849,7 +991,7 @@ def execute(args):
                 ][species]
                 scenario_variables["perceived_annual_floral_index_path"][scenario_name][
                     species
-                ] = floral_index.replace(".tif", "_aggregated.tif")
+                ] = floral_index.with_stem(floral_index.stem + "_aggregated")
                 warp_rasters_task_map["perceived_annual_floral"][scenario_name][
                     species
                 ] = task_graph.add_task(
@@ -876,7 +1018,7 @@ def execute(args):
                     target_path_list=[
                         scenario_variables["perceived_annual_floral_index_path"][
                             scenario_name
-                        ][[species]]
+                        ][species]
                     ],
                 )
 
@@ -912,12 +1054,12 @@ def execute(args):
             alpha = (
                 scenario_variables["alpha_value"][species] / landcover_mean_pixel_size
             )
-            kernel_path = intermediate_output_dir / (
-                _KERNEL_FILE_PATTERN % (alpha, file_suffix)
+            kernel_path = species_dir / (
+                _KERNEL_FILE_PATTERN % (alpha, basic_file_suffix)
             )
 
-            alpha_kernel_raster_task = task_graph.add_task(
-                task_name=f"decay_kernel_raster_{alpha}",
+            alpha_kernel_raster_task_map[scenario_name][species] = task_graph.add_task(
+                task_name=f"decay_kernel_raster_{scenario_name}_{species}",
                 func=utils.exponential_decay_kernel_raster,
                 args=([alpha, str(kernel_path)]),
                 target_path_list=[str(kernel_path)],
@@ -932,42 +1074,45 @@ def execute(args):
             )
 
             if scenario_name == BASELINE_SCENARIO_LABEL:
-                # convolve HN with alpha_s
-                LOGGER.info(
-                    f"{scenario_name} | Calculating Nesting Density convolution for species: {species}"
-                )
-                baseline_nesting_density_path = intermediate_output_dir / (
-                    _NESTING_DENSITY_FILE_PATTERN % (species, file_suffix)
-                )
+                # TODO make sure this still works with multiple scenarios
+                if run_scenario_analysis:
+                    # convolve HN with alpha_s
+                    LOGGER.info(
+                        f"{scenario_name} | Calculating Nesting Density convolution for species: {species}"
+                    )
+                    baseline_nesting_density_path = intermediate_output_dir / (
+                        _NESTING_DENSITY_FILE_PATTERN % (species, file_suffix)
+                    )
 
-                baseline_nesting_density_task = task_graph.add_task(
-                    task_name=f"convolve_nesting_{species}_{scenario_name}",
-                    func=pygeoprocessing.convolve_2d,
-                    args=(
-                        [
-                            (
-                                str(
-                                    scenario_variables["habitat_nesting_index_path"][
-                                        scenario_name
-                                    ][species]
+                    baseline_nesting_density_task = task_graph.add_task(
+                        task_name=f"convolve_nesting_{species}_{scenario_name}",
+                        func=pygeoprocessing.convolve_2d,
+                        args=(
+                            [
+                                (
+                                    str(
+                                        scenario_variables[
+                                            "habitat_nesting_index_path"
+                                        ][scenario_name][species]
+                                    ),
+                                    1,
                                 ),
-                                1,
-                            ),
-                            (str(kernel_path), 1),
-                            str(baseline_nesting_density_path),
-                        ]
-                    ),
-                    kwargs={
-                        "ignore_nodata_and_edges": True,
-                        "mask_nodata": True,
-                        "normalize_kernel": False,
-                    },
-                    dependent_task_list=[
-                        alpha_kernel_raster_task,
-                        habitat_nesting_task_map[scenario_name][species],
-                    ],
-                    target_path_list=[str(baseline_nesting_density_path)],
-                )
+                                (str(kernel_path), 1),
+                                str(baseline_nesting_density_path),
+                            ]
+                        ),
+                        kwargs={
+                            "ignore_nodata_and_edges": True,
+                            "mask_nodata": True,
+                            "normalize_kernel": False,
+                            "target_nodata": _INDEX_NODATA,
+                        },
+                        dependent_task_list=[
+                            alpha_kernel_raster_task_map[scenario_name][species],
+                            habitat_nesting_task_map[scenario_name][species],
+                        ],
+                        target_path_list=[str(baseline_nesting_density_path)],
+                    )
 
                 # convolve annual forage with alpha_s
                 LOGGER.info(
@@ -1000,9 +1145,10 @@ def execute(args):
                         "ignore_nodata_and_edges": True,
                         "mask_nodata": True,
                         "normalize_kernel": False,
+                        "target_nodata": _INDEX_NODATA,
                     },
                     dependent_task_list=[
-                        alpha_kernel_raster_task,
+                        alpha_kernel_raster_task_map[scenario_name][species],
                     ],
                     target_path_list=[str(foraging_effectiveness_index_path)],
                 )
@@ -1094,6 +1240,7 @@ def execute(args):
                         "ignore_nodata_and_edges": True,
                         "mask_nodata": True,
                         "normalize_kernel": False,
+                        "target_nodata": _INDEX_NODATA,
                     },
                     dependent_task_list=[
                         species_landscape_score_task_map[scenario_name][species],
@@ -1114,7 +1261,7 @@ def execute(args):
                     f"{scenario_name} | Calculating biophysical Marginal Value raster for species: {species}"
                 )
                 d_pollinator_species_landscape_score_path = species_dir / (
-                    _SPECIES_MARGINAL_VALUE_FILE_PATTERN % (species, file_suffix)
+                    _SPECIES_D_POLLINATOR_LANDSCAPE_SCORE % (species, file_suffix)
                 )
 
                 species_marginal_value_task_map[scenario_name] = task_graph.add_task(
@@ -1175,6 +1322,7 @@ def execute(args):
             )
 
             species_pollinator_visitation_index_path_band_list = []
+            species_pollinator_visitation_index_nodata_list = []
             species_abundance_list = []
             for species in scenario_variables["species_list"]:
                 species_pollinator_visitation_index_path_band_list.append(
@@ -1187,12 +1335,23 @@ def execute(args):
                         1,
                     )
                 )
+                species_pollinator_visitation_index_nodata_list.append(
+                    pygeoprocessing.get_raster_info(
+                        str(
+                            scenario_variables[
+                                "species_pollinator_visitation_index_path"
+                            ][scenario_name][species]
+                        )
+                    )["nodata"][0]
+                )
                 species_abundance_list.append(
                     scenario_variables["species_abundance"][species]
                 )
 
             sum_by_scalar_raster_op = rasterops.SumRastersByScalar(
-                species_abundance_list, _INDEX_NODATA
+                species_abundance_list,
+                species_pollinator_visitation_index_nodata_list,
+                _INDEX_NODATA,
             )
             # TODO Change to a sum rather than sum by scalar (once we have relative abundance calculated earlier)
             total_pollinator_visitation_task_map[scenario_name] = task_graph.add_task(
@@ -1234,7 +1393,7 @@ def execute(args):
             ]
 
             d_pollinator_landscape_score_path = output_dir / (
-                _MARGINAL_VALUE_FILE_PATTERN % file_suffix
+                _D_POLLINATOR_LANDSCAPE_SCORE % file_suffix
             )
 
             marginal_value_task_map[scenario_name] = task_graph.add_task(
@@ -1256,39 +1415,6 @@ def execute(args):
             ] = d_pollinator_landscape_score_path
 
         if "calculate_yield" in args and args["calculate_yield"]:
-            # Create additional scenario_variable dictionaries
-            for scenario_variable_list in [
-                "crop_pollinator_dependence_raster_path",
-                "half_saturation_coefficient_raster_path",
-                "crop_value_raster_path",
-                "annual_yield_raster_path",
-                "annual_yield_value_raster_path",
-                "delta_annual_yield_by_visitation_raster_path",
-                "delta_annual_yield_by_landscape_score_raster_path",
-                "delta_annual_yield_raster_path",
-                "delta_annual_yield_value_raster_path",
-            ]:
-                scenario_variables[scenario_variable_list] = {
-                    name: {} for name in scenario_labels_list
-                }
-
-            # Create taskgraph task dictionaries
-            crop_pollinator_dependence_tasks = {
-                name: {} for name in scenario_labels_list
-            }
-            half_saturation_tasks = {name: {} for name in scenario_labels_list}
-            crop_value_tasks = {name: {} for name in scenario_labels_list}
-            annual_yield_tasks = {name: {} for name in scenario_labels_list}
-            annual_yield_value_tasks = {name: {} for name in scenario_labels_list}
-            delta_annual_yield_by_visitation_tasks = {
-                name: {} for name in scenario_labels_list
-            }
-            delta_annual_yield_by_landscape_score_tasks = {
-                name: {} for name in scenario_labels_list
-            }
-            delta_annual_yield_tasks = {name: {} for name in scenario_labels_list}
-            delta_annual_yield_value_tasks = {name: {} for name in scenario_labels_list}
-
             # Reclassify raster to crop pollinator dependence
             LOGGER.info(f"{scenario_name} | Creating Crop Pollinator Dependence raster")
             crop_pollinator_dependence_raster_path = intermediate_output_dir / (
@@ -1387,6 +1513,137 @@ def execute(args):
                 scenario_name
             ] = crop_value_raster_path
 
+            # Aggregate raster data if necessary
+            # TODO aggregate crop rasters
+            if args["aggregate_size"] not in [None, ""]:
+                LOGGER.info(
+                    f"{scenario_name} | Aggregating crop pollinator dependence, value, and half saturation rasters"
+                )
+                landcover_pixel_size_tuple = tuple(
+                    args["aggregate_size"] * x
+                    for x in landcover_raster_info["pixel_size"]
+                )
+                # Aggregating crop pollinator dependence
+                crop_dependence_path = scenario_variables[
+                    "crop_pollinator_dependence_raster_path"
+                ][scenario_name]
+                scenario_variables["crop_pollinator_dependence_raster_path"][
+                    scenario_name
+                ] = crop_dependence_path.with_stem(
+                    crop_dependence_path.stem + "_aggregated"
+                )
+                warp_rasters_task_map["crop_dependence"][
+                    scenario_name
+                ] = task_graph.add_task(
+                    task_name=f"aggregate_crop_dependence_raster_{scenario_name}",
+                    func=pygeoprocessing.warp_raster,
+                    args=(
+                        [
+                            str(crop_dependence_path),
+                            landcover_pixel_size_tuple,
+                            str(
+                                scenario_variables[
+                                    "crop_pollinator_dependence_raster_path"
+                                ][scenario_name]
+                            ),
+                        ]
+                    ),
+                    kwargs={
+                        "resample_method": "average",
+                        "target_bb": landcover_raster_info["bounding_box"],
+                    },
+                    dependent_task_list=[
+                        crop_pollinator_dependence_tasks[scenario_name]
+                    ],
+                    target_path_list=[
+                        scenario_variables["crop_pollinator_dependence_raster_path"][
+                            scenario_name
+                        ]
+                    ],
+                )
+
+                # Aggregate half saturation raster
+                half_saturation_path = scenario_variables[
+                    "half_saturation_coefficient_raster_path"
+                ][scenario_name]
+                scenario_variables["half_saturation_coefficient_raster_path"][
+                    scenario_name
+                ] = half_saturation_path.with_stem(
+                    half_saturation_path.stem + "_aggregated"
+                )
+                warp_rasters_task_map["half_saturation"][
+                    scenario_name
+                ] = task_graph.add_task(
+                    task_name=f"aggregate_half_saturation_raster_{scenario_name}",
+                    func=pygeoprocessing.warp_raster,
+                    args=(
+                        [
+                            str(half_saturation_path),
+                            landcover_pixel_size_tuple,
+                            str(
+                                scenario_variables[
+                                    "half_saturation_coefficient_raster_path"
+                                ][scenario_name]
+                            ),
+                        ]
+                    ),
+                    kwargs={
+                        "resample_method": "average",
+                        "target_bb": landcover_raster_info["bounding_box"],
+                    },
+                    dependent_task_list=[half_saturation_tasks[scenario_name]],
+                    target_path_list=[
+                        scenario_variables["half_saturation_coefficient_raster_path"][
+                            scenario_name
+                        ]
+                    ],
+                )
+
+                # Aggregate crop value raster
+                crop_value_path = scenario_variables["crop_value_raster_path"][
+                    scenario_name
+                ]
+                scenario_variables["crop_value_raster_path"][
+                    scenario_name
+                ] = crop_value_path.with_stem(crop_value_path.stem + "_aggregated")
+                warp_rasters_task_map["crop_value"][
+                    scenario_name
+                ] = task_graph.add_task(
+                    task_name=f"aggregate_crp_value_raster_{scenario_name}",
+                    func=pygeoprocessing.warp_raster,
+                    args=(
+                        [
+                            str(crop_value_path),
+                            landcover_pixel_size_tuple,
+                            str(
+                                scenario_variables["crop_value_raster_path"][
+                                    scenario_name
+                                ]
+                            ),
+                        ]
+                    ),
+                    kwargs={
+                        "resample_method": "sum",
+                        "target_bb": landcover_raster_info["bounding_box"],
+                    },
+                    dependent_task_list=[crop_value_tasks[scenario_name]],
+                    target_path_list=[
+                        scenario_variables["crop_value_raster_path"][scenario_name]
+                    ],
+                )
+
+            else:
+                warp_rasters_task_map["crop_dependence"][
+                    scenario_name
+                ] = crop_pollinator_dependence_tasks[scenario_name]
+                warp_rasters_task_map["half_saturation"][
+                    scenario_name
+                ] = half_saturation_tasks[scenario_name]
+                warp_rasters_task_map["crop_value"][scenario_name] = crop_value_tasks[
+                    scenario_name
+                ]
+                landcover_pixel_size_tuple = landcover_raster_info["pixel_size"]
+
             if scenario_name == BASELINE_SCENARIO_LABEL:
                 LOGGER.info(f"{scenario_name} | Creating Crop Yield raster")
 
@@ -1430,8 +1687,8 @@ def execute(args):
                         _INDEX_NODATA,
                     ),
                     dependent_task_list=[
-                        crop_pollinator_dependence_tasks[scenario_name],
-                        half_saturation_tasks[scenario_name],
+                        warp_rasters_task_map["crop_dependence"][scenario_name],
+                        warp_rasters_task_map["half_saturation"][scenario_name],
                         total_pollinator_visitation_task_map[scenario_name],
                     ],
                     target_path_list=[str(annual_yield_raster_path)],
@@ -1478,7 +1735,7 @@ def execute(args):
                     ),
                     dependent_task_list=[
                         annual_yield_tasks[scenario_name],
-                        crop_value_tasks[scenario_name],
+                        warp_rasters_task_map["crop_value"][scenario_name],
                     ],
                     target_path_list=[str(annual_yield_value_raster_path)],
                 )
@@ -1486,6 +1743,12 @@ def execute(args):
                 scenario_variables["annual_yield_value_raster_path"][
                     scenario_name
                 ] = annual_yield_value_raster_path
+
+                LOGGER.info(
+                    scenario_variables["annual_yield_value_raster_path"][
+                        BASELINE_SCENARIO_LABEL
+                    ]
+                )
             else:
                 # Calculate delta yield
                 LOGGER.info(
@@ -1537,8 +1800,8 @@ def execute(args):
                         str(delta_annual_yield_by_visitation_raster_path)
                     ],
                     dependent_task_list=[
-                        crop_pollinator_dependence_tasks[scenario_name],
-                        half_saturation_tasks[scenario_name],
+                        warp_rasters_task_map["crop_dependence"][scenario_name],
+                        warp_rasters_task_map["half_saturation"][scenario_name],
                     ],
                 )
 
@@ -1549,8 +1812,12 @@ def execute(args):
                 LOGGER.info(
                     f"{scenario_name} | Calculating Crop Yield Marginal Value raster | By landscape score (convolve)"
                 )
-                delta_annual_yield_by_landscape_score_raster_path = output_dir / (
-                    _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_FILE_PATTERN % file_suffix
+                delta_annual_yield_by_landscape_score_raster_path = (
+                    intermediate_output_dir
+                    / (
+                        _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_FILE_PATTERN
+                        % file_suffix
+                    )
                 )
 
                 delta_annual_yield_by_landscape_score_tasks[
@@ -1576,6 +1843,7 @@ def execute(args):
                         "ignore_nodata_and_edges": True,
                         "mask_nodata": True,
                         "normalize_kernel": False,
+                        "target_nodata": _INDEX_NODATA,
                     },
                     target_path_list=[
                         str(delta_annual_yield_by_landscape_score_raster_path)
@@ -1597,7 +1865,7 @@ def execute(args):
                     _DELTA_ANNUAL_YIELD_FILE_PATTERN % file_suffix
                 )
 
-                delta_annual_yield_raster_path[scenario_name] = task_graph.add_task(
+                delta_annual_yield_tasks[scenario_name] = task_graph.add_task(
                     task_name=f"calculate_delta_yield_{scenario_name}",
                     func=pygeoprocessing.raster_calculator,
                     args=(
@@ -1619,12 +1887,24 @@ def execute(args):
                                 1,
                             ),
                             (
-                                str(
-                                    scenario_variables[
-                                        "annual_yield_value_raster_path"
-                                    ][BASELINE_SCENARIO_LABEL]
-                                ),
-                                1,
+                                pygeoprocessing.get_raster_info(
+                                    str(
+                                        scenario_variables[
+                                            "delta_annual_yield_by_landscape_score_raster_path"
+                                        ][scenario_name]
+                                    )
+                                )["nodata"][0],
+                                "raw",
+                            ),
+                            (
+                                pygeoprocessing.get_raster_info(
+                                    str(
+                                        scenario_variables[
+                                            "d_pollinator_landscape_score_path"
+                                        ][scenario_name]
+                                    )
+                                )["nodata"][0],
+                                "raw",
                             ),
                         ],
                         delta_yield_habitat_op,
@@ -1634,9 +1914,7 @@ def execute(args):
                     ),
                     target_path_list=[str(delta_annual_yield_raster_path)],
                     dependent_task_list=[
-                        delta_annual_yield_by_landscape_score_raster_path[
-                            scenario_name
-                        ],
+                        delta_annual_yield_by_landscape_score_tasks[scenario_name],
                         annual_yield_value_tasks[BASELINE_SCENARIO_LABEL],
                     ],
                 )
@@ -1661,7 +1939,7 @@ def execute(args):
                             (
                                 str(
                                     scenario_variables[
-                                        "delta_annual_yield_habitat_raster_path"
+                                        "delta_annual_yield_raster_path"
                                     ][scenario_name]
                                 ),
                                 1,
@@ -1682,7 +1960,7 @@ def execute(args):
                     ),
                     dependent_task_list=[
                         delta_annual_yield_tasks[scenario_name],
-                        crop_value_tasks[scenario_name],
+                        warp_rasters_task_map["crop_value"][scenario_name],
                     ],
                     target_path_list=[str(delta_annual_yield_value_raster_path)],
                 )
@@ -1691,11 +1969,354 @@ def execute(args):
                     scenario_name
                 ] = delta_annual_yield_value_raster_path
 
+                # TODO implement masking by owner to partition public/private benefit
+
+                if ownership_vector_path is not None:
+                    # Mask by ownership data
+                    LOGGER.info(f"{scenario_name} | Masking by ownership data")
+                    delta_annual_yield_by_visitation_by_ownership_raster_path_list = [
+                        str(
+                            ownership_dir
+                            / (
+                                _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
+                                % (nature.strip_string(owner), file_suffix)
+                            )
+                        )
+                        for owner in scenario_variables["owner_list"]
+                    ]
+                    delta_annual_yield_by_visitation_by_ownership_raster_path_dict = {
+                        nature.strip_string(owner): ownership_dir
+                        / (
+                            _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
+                            % (nature.strip_string(owner), file_suffix)
+                        )
+                        for owner in scenario_variables["owner_list"]
+                    }
+
+                    ownership_mask_task_list[scenario_name] = task_graph.add_task(
+                        task_name=f"rasterize_ownership_data_{scenario_name}",
+                        func=mask_by_owners_op,
+                        args=(
+                            [
+                                str(ownership_vector_path),
+                                _OWNERSHIP_FIELD,
+                                scenario_variables["owner_list"],
+                                file_suffix,
+                                str(
+                                    scenario_variables[
+                                        "delta_annual_yield_by_visitation_raster_path"
+                                    ][scenario_name]
+                                ),
+                                str(ownership_dir),
+                            ]
+                        ),
+                        target_path_list=delta_annual_yield_by_visitation_by_ownership_raster_path_list,
+                        dependent_task_list=[
+                            reproject_ownership_task,
+                            delta_annual_yield_by_visitation_tasks[scenario_name],
+                        ],
+                    )
+                    scenario_variables[
+                        "delta_annual_yield_by_visitation_by_ownership_raster_path"
+                    ][
+                        scenario_name
+                    ] = delta_annual_yield_by_visitation_by_ownership_raster_path_dict
+
+                    # Calculating private vs public change in yield.
+                    # TODO Change filepaths to reflect ownership
+                    for owner in scenario_variables["owner_list"]:
+                        owner = nature.strip_string(owner)
+                        LOGGER.debug(
+                            f"{scenario_name} | {owner} | Calculating Private Crop Yield Marginal Value raster | By landscape score (convolve)"
+                        )
+                        delta_annual_yield_by_landscape_score_by_ownership_raster_path = ownership_dir / (
+                            _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_BY_OWNERSHIP_FILE_PATTERN
+                            % (owner, file_suffix)
+                        )
+
+                        delta_annual_yield_by_landscape_score_by_ownership_tasks[
+                            scenario_name
+                        ][owner] = task_graph.add_task(
+                            task_name=f"calculate_delta_yield_by_landscape_score_{scenario_name}_{owner}",
+                            func=pygeoprocessing.convolve_2d,
+                            args=(
+                                [
+                                    (
+                                        str(
+                                            scenario_variables[
+                                                "delta_annual_yield_by_visitation_by_ownership_raster_path"
+                                            ][scenario_name][owner]
+                                        ),
+                                        1,
+                                    ),
+                                    (str(kernel_path), 1),
+                                    str(
+                                        delta_annual_yield_by_landscape_score_by_ownership_raster_path
+                                    ),
+                                ]
+                            ),
+                            kwargs={
+                                "ignore_nodata_and_edges": True,
+                                "mask_nodata": True,
+                                "normalize_kernel": False,
+                                "target_nodata": _INDEX_NODATA,
+                            },
+                            target_path_list=[
+                                str(
+                                    delta_annual_yield_by_landscape_score_by_ownership_raster_path
+                                )
+                            ],
+                            dependent_task_list=[
+                                ownership_mask_task_list[scenario_name]
+                            ],
+                        )
+
+                        scenario_variables[
+                            "delta_annual_yield_by_landscape_score_by_ownership_raster_path"
+                        ][scenario_name][
+                            owner
+                        ] = delta_annual_yield_by_landscape_score_by_ownership_raster_path
+
+                        LOGGER.debug(
+                            f"{scenario_name} | {owner} | Calculating Private Crop Yield Marginal Value raster | Multiply by landscape score"
+                        )
+
+                        delta_annual_yield_by_ownership_raster_path = (
+                            ownership_output_dir
+                            / (
+                                _DELTA_ANNUAL_YIELD_BY_OWNERSHIP_FILE_PATTERN
+                                % (owner, file_suffix)
+                            )
+                        )
+
+                        delta_annual_yield_by_ownership_tasks[scenario_name][
+                            owner
+                        ] = task_graph.add_task(
+                            task_name=f"calculate_delta_yield_{scenario_name}_{owner}",
+                            func=pygeoprocessing.raster_calculator,
+                            args=(
+                                [
+                                    (
+                                        str(
+                                            scenario_variables[
+                                                "delta_annual_yield_by_landscape_score_by_ownership_raster_path"
+                                            ][scenario_name][owner]
+                                        ),
+                                        1,
+                                    ),
+                                    (
+                                        str(
+                                            scenario_variables[
+                                                "d_pollinator_landscape_score_path"
+                                            ][scenario_name]
+                                        ),
+                                        1,
+                                    ),
+                                    (
+                                        pygeoprocessing.get_raster_info(
+                                            str(
+                                                scenario_variables[
+                                                    "delta_annual_yield_by_landscape_score_by_ownership_raster_path"
+                                                ][scenario_name][owner]
+                                            )
+                                        )["nodata"][0],
+                                        "raw",
+                                    ),
+                                    (
+                                        pygeoprocessing.get_raster_info(
+                                            str(
+                                                scenario_variables[
+                                                    "d_pollinator_landscape_score_path"
+                                                ][scenario_name]
+                                            )
+                                        )["nodata"][0],
+                                        "raw",
+                                    ),
+                                ],
+                                delta_yield_habitat_op,
+                                str(delta_annual_yield_by_ownership_raster_path),
+                                gdal.GDT_Float32,
+                                _INDEX_NODATA,
+                            ),
+                            target_path_list=[
+                                str(delta_annual_yield_by_ownership_raster_path)
+                            ],
+                            dependent_task_list=[
+                                delta_annual_yield_by_landscape_score_by_ownership_tasks[
+                                    scenario_name
+                                ][
+                                    owner
+                                ],
+                                marginal_value_task_map[scenario_name],
+                                annual_yield_value_tasks[BASELINE_SCENARIO_LABEL],
+                            ],
+                        )
+
+                        scenario_variables[
+                            "delta_annual_yield_by_ownership_raster_path"
+                        ][scenario_name][
+                            owner
+                        ] = delta_annual_yield_by_ownership_raster_path
+
+                        # calculate the marginal change in annual crop yield value
+                        LOGGER.debug(
+                            f"{scenario_name} | {owner} | Calculating Private Annual Crop Yield Value Marginal Value raster"
+                        )
+                        delta_annual_yield_value_by_ownership_raster_path = (
+                            ownership_output_dir
+                            / (
+                                _DELTA_ANNUAL_YIELD_VALUE_BY_OWNERSHIP_FILE_PATTERN
+                                % (owner, file_suffix)
+                            )
+                        )
+
+                        delta_annual_yield_value_by_ownership_tasks[scenario_name][
+                            owner
+                        ] = task_graph.add_task(
+                            task_name=f"calculate_delta_annual_yield_value_{scenario_name}_{owner}",
+                            func=pygeoprocessing.raster_calculator,
+                            args=(
+                                [
+                                    (
+                                        str(
+                                            scenario_variables[
+                                                "delta_annual_yield_by_ownership_raster_path"
+                                            ][scenario_name][owner]
+                                        ),
+                                        1,
+                                    ),
+                                    (
+                                        str(
+                                            scenario_variables[
+                                                "crop_value_raster_path"
+                                            ][scenario_name]
+                                        ),
+                                        1,
+                                    ),
+                                ],
+                                multiply_rasters_op,
+                                str(delta_annual_yield_value_by_ownership_raster_path),
+                                gdal.GDT_Float32,
+                                _INDEX_NODATA,
+                            ),
+                            dependent_task_list=[
+                                delta_annual_yield_by_ownership_tasks[scenario_name][
+                                    owner
+                                ],
+                                warp_rasters_task_map["crop_value"][scenario_name],
+                            ],
+                            target_path_list=[
+                                str(delta_annual_yield_value_by_ownership_raster_path)
+                            ],
+                        )
+
+                        scenario_variables[
+                            "delta_annual_yield_value_by_ownership_raster_path"
+                        ][scenario_name][
+                            owner
+                        ] = delta_annual_yield_value_by_ownership_raster_path
+
+                    LOGGER.info(
+                        f"{scenario_name} | Calculating sum of 'private' changes in yield value"
+                    )
+                    delta_annual_yield_value_private_raster_path = output_dir / (
+                        _DELTA_ANNUAL_YIELD_VALUE_PRIVATE_FILE_PATTERN % file_suffix
+                    )
+
+                    delta_annual_yield_value_by_ownership_raster_path_list = [
+                        (
+                            str(
+                                scenario_variables[
+                                    "delta_annual_yield_value_by_ownership_raster_path"
+                                ][scenario_name][nature.strip_string(owner)]
+                            ),
+                            1,
+                        )
+                        for owner in scenario_variables["owner_list"]
+                    ]
+
+                    delta_annual_yield_value_private_tasks[
+                        scenario_name
+                    ] = task_graph.add_task(
+                        task_name=f"calculate_delta_annual_yield_value_private_{scenario_name}",
+                        func=pygeoprocessing.raster_calculator,
+                        args=(
+                            delta_annual_yield_value_by_ownership_raster_path_list,
+                            sum_raster_op,
+                            str(delta_annual_yield_value_private_raster_path),
+                            gdal.GDT_Float32,
+                            _INDEX_NODATA,
+                        ),
+                        dependent_task_list=[
+                            delta_annual_yield_value_by_ownership_tasks[scenario_name][
+                                nature.strip_string(owner)
+                            ]
+                            for owner in scenario_variables["owner_list"]
+                        ],
+                        target_path_list=[
+                            str(delta_annual_yield_value_private_raster_path)
+                        ],
+                    )
+
+                    scenario_variables["delta_annual_yield_value_private_raster_path"][
+                        scenario_name
+                    ] = delta_annual_yield_value_private_raster_path
+
+                    LOGGER.info(
+                        f"{scenario_name} | Calculating yield value externality"
+                    )
+                    delta_annual_yield_value_externality_raster_path = output_dir / (
+                        _DELTA_ANNUAL_YIELD_VALUE_EXTERNALITY_FILE_PATTERN % file_suffix
+                    )
+
+                    delta_annual_yield_externality_tasks[
+                        scenario_name
+                    ] = task_graph.add_task(
+                        task_name=f"calculate_delta_annual_yield_value_externality_{scenario_name}",
+                        func=pygeoprocessing.raster_calculator,
+                        args=(
+                            [
+                                (
+                                    str(
+                                        scenario_variables[
+                                            "delta_annual_yield_value_raster_path"
+                                        ][scenario_name]
+                                    ),
+                                    1,
+                                ),
+                                (
+                                    str(
+                                        scenario_variables[
+                                            "delta_annual_yield_value_private_raster_path"
+                                        ][scenario_name]
+                                    ),
+                                    1,
+                                ),
+                            ],
+                            subtract_two_rasters_op,
+                            str(delta_annual_yield_value_externality_raster_path),
+                            gdal.GDT_Float32,
+                            _INDEX_NODATA,
+                        ),
+                        dependent_task_list=[
+                            delta_annual_yield_value_tasks[scenario_name],
+                            delta_annual_yield_value_private_tasks[scenario_name],
+                        ],
+                        target_path_list=[
+                            str(delta_annual_yield_value_externality_raster_path)
+                        ],
+                    )
+
+                    scenario_variables[
+                        "delta_annual_yield_value_externality_raster_path"
+                    ][scenario_name] = delta_annual_yield_value_externality_raster_path
+
     task_graph.close()
     task_graph.join()
 
 
 # Create raster multiplication operations from nodata value
+subtract_two_rasters_op = rasterops.SubtractTwoRasters(_INDEX_NODATA)
 multiply_rasters_op = rasterops.MultiplyRasters(_INDEX_NODATA)
 sum_raster_op = rasterops.SumRasters(_INDEX_NODATA)
 sum_raster_cap_one_op = rasterops.SumRastersWithCap(1, _INDEX_NODATA)
@@ -1984,8 +2605,10 @@ def yield_op(
 
 def delta_yield_habitat_op(
     delta_yield_by_delta_landscape_score_array,
-    delta_landscape_score_by_habitat_array,
-    yield_array,
+    delta_landscape_score_array,
+    delta_yield_by_delta_landscape_score_nodata,
+    delta_landscape_score_nodata,
+    # yield_array,
 ):
     """Calculate change in yields by habitat = dy_dpls * dpls_dhab * y
     where:
@@ -2000,14 +2623,15 @@ def delta_yield_habitat_op(
 
     valid_mask = np.logical_and.reduce(
         (
-            delta_yield_by_delta_landscape_score_array != _INDEX_NODATA,
-            delta_landscape_score_by_habitat_array != _INDEX_NODATA,
+            delta_yield_by_delta_landscape_score_array
+            != delta_yield_by_delta_landscape_score_nodata,
+            delta_landscape_score_array != delta_landscape_score_nodata,
             # yield_array != _INDEX_NODATA,
         )
     )
 
     dy_dpls = delta_yield_by_delta_landscape_score_array[valid_mask]
-    dpls_dhab = delta_landscape_score_by_habitat_array[valid_mask]
+    dpls_dhab = delta_landscape_score_array[valid_mask]
     # y = yield_array[valid_mask]
 
     # result[valid_mask] = dy_dpls * dpls_dhab * y
@@ -2016,13 +2640,53 @@ def delta_yield_habitat_op(
     return result
 
 
+def mask_by_owners_op(
+    ownership_vector_path,
+    owner_field,
+    owner_list,
+    file_suffix,
+    base_raster_path,
+    temp_dir,
+):
+    # Ensure paths
+    base_raster_path = Path(base_raster_path)
+    temp_dir = Path(temp_dir)
+
+    if not all(
+        [
+            (
+                temp_dir
+                / (
+                    _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
+                    % (nature.strip_string(owner), file_suffix)
+                )
+            ).is_file()
+            for owner in owner_list
+        ]
+    ):
+        for owner in owner_list:
+            pygeoprocessing.mask_raster(
+                (str(base_raster_path), 1),
+                str(ownership_vector_path),
+                str(
+                    temp_dir
+                    / (
+                        _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
+                        % (nature.strip_string(owner), file_suffix)
+                    )
+                ),
+                working_dir=str(temp_dir),
+                where_clause=f"{owner_field}  = '{owner}'",
+            )
+
+
 def _parse_scenario_variables(
     args, scenario_labels_list, scenario_args_dict, scenario_filepath_list
 ):
     """Parse out scenario variables from input parameters.
 
     This function parses through the guild table, biophysical table, and
-    farm polygons (if available) to generate
+    ownership parcel polygons (if available) to generate
 
     Parameter:
         args (dict): this is the args dictionary passed in to the `execute`
@@ -2041,46 +2705,22 @@ def _parse_scenario_variables(
             * landcover_floral_resources[season][landcover] (float)
             * species_abundance[species] (string->float)
             * species_foraging_activity[(species, season)] (string->float)
-            * species_substrate_index[(species, substrate)] (tuple->float)
+            * species_substrate_index[species][substrate] (string->float)
             * foraging_activity_index[(species, season)] (tuple->float)
     """
 
     yield_calc_bool = "calculate_yield" in args and args["calculate_yield"]
-
-    # Update MODEL_SPEC if necessary
-    if yield_calc_bool:
-        MODEL_SPEC["args"]["landcover_biophysical_table_path"]["columns"].update(
-            {
-                "crop_pollinator_dependence_[SEASON]_index": {
-                    "type": "ratio",
-                    "about": "Index of crop dependence on pollinators during [SEASON]. "
-                    "Replace [SEASON] with season names matching those "
-                    "in the Guild Table, so that there is a column for each "
-                    "season.",
-                },
-                "half_saturation_coefficient": {
-                    "type": "ratio",
-                    "about": "The half saturation coefficient for the crop grown "
-                    "in this area. This is the wild pollinator abundance "
-                    "(i.e. the proportion of all pollinators that are "
-                    "wild) needed to reach half of the total potential "
-                    "pollinator-dependent yield.",
-                },
-                "value_per_hectare": {
-                    "type": "number",
-                    "units": u.currency / u.hectare,
-                    "about": "The value of the crop in dollars per square hectare. "
-                    "This is used to calculate the value of the pollinator-"
-                    "dependent yield.",
-                },
-            },
-        )
 
     guild_table_path = args["guild_table_path"]
 
     guild_df = utils.read_csv_to_dataframe(
         guild_table_path, MODEL_SPEC["args"]["guild_table_path"]
     )
+
+    if "ownership_vector_path" in args and args["ownership_vector_path"] != "":
+        ownership_vector_path = args["ownership_vector_path"]
+    else:
+        ownership_vector_path = None
 
     LOGGER.info("Checking to make sure guild table has all expected headers")
     for header in _EXPECTED_GUILD_HEADERS:
@@ -2103,15 +2743,13 @@ def _parse_scenario_variables(
         if match:
             season = match.group(1)
             season_to_header[season]["guild"] = match.group()
-        match = re.match(_NESTING_SUITABILITY_PATTERN, header)
+            season_to_header[season]["biophysical"] = []
+        match = re.match(_NESTING_SUITABILITY_RE_PATTERN, header)
         if match:
             substrate = match.group(1)
             substrate_to_header[substrate]["guild"] = match.group()
+            substrate_to_header[substrate]["biophysical"] = []
 
-    # Create empty dicts for scenario names
-    substrate_to_header[substrate]["biophysical"] = []
-    season_to_header[season]["biophysical"] = []
-    season_to_header[season]["crop_pollinator_dependence"] = []
     # Iterate through scenarios
     scenario_biophysical_df_dict = {}
     for scenario_name in scenario_labels_list:
@@ -2152,28 +2790,69 @@ def _parse_scenario_variables(
                 substrate = match.group(1)
                 substrate_to_header[substrate]["biophysical"].append(match.group())
 
-    season_to_header[season]["biophysical"] = list(
-        set(season_to_header[season]["biophysical"])
-    )
-    substrate_to_header[substrate]["biophysical"] = list(
-        set(substrate_to_header[substrate]["biophysical"])
-    )
+    ownership_vector = None
+    if ownership_vector_path is not None:
+        LOGGER.info("Checking that ownership parcel polygon has expected headers")
+        ownership_vector = gdal.OpenEx(ownership_vector_path)
+        ownership_layer = ownership_vector.GetLayer()
+        if ownership_layer.GetGeomType() not in [ogr.wkbPolygon, ogr.wkbMultiPolygon]:
+            ownership_layer = None
+            ownership_vector = None
+            raise ValueError("Ownership layer not a polygon type")
+        ownership_layer_defn = ownership_layer.GetLayerDefn()
+        ownership_headers = [
+            ownership_layer_defn.GetFieldDefn(i).GetName()
+            for i in range(ownership_layer_defn.GetFieldCount())
+        ]
+        for header in _EXPECTED_OWNERSHIP_HEADERS:
+            matches = re.findall(header, " ".join(ownership_headers))
+            if not matches:
+                raise ValueError(
+                    f"Missing expected header(s) '{header}' from "
+                    f"{ownership_vector_path}.\n"
+                    f"Got these headers instead: {ownership_headers}"
+                )
+        owner_set = set()
+        for ownership_feature in ownership_layer:
+            owner_set.add(ownership_feature.GetField(_OWNERSHIP_FIELD))
 
-    header_check = [
-        len(season_to_header[season]["biophysical"]) == 1,
-        len(substrate_to_header[substrate]["biophysical"]) == 1,
-    ]
-    assert_message = (
-        f"Expected a single column name for all tables. {substrate_to_header[substrate]['biophysical']}, "
-        f"{season_to_header[season]['biophysical']} "
-    )
+    result = {}
+    # * season_list (list of string)
+    result["season_list"] = sorted(season_to_header)
+    # * substrate_list (list of string)
+    result["substrate_list"] = sorted(substrate_to_header)
+    # * species_list (list of string)
+    result["species_list"] = sorted(guild_df.index)
 
-    assert all(header_check), assert_message
+    if ownership_vector_path is not None:
+        result["owner_list"] = owner_set
 
-    season_to_header[season]["biophysical"] = season_to_header[season]["biophysical"][0]
-    substrate_to_header[substrate]["biophysical"] = substrate_to_header[substrate][
-        "biophysical"
-    ][0]
+    for substrate in result["substrate_list"]:
+        # Make a list of unique columns
+        substrate_to_header[substrate]["biophysical"] = list(
+            set(substrate_to_header[substrate]["biophysical"])
+        )
+        # Ensure that list only contains one column
+        assert (
+            len(substrate_to_header[substrate]["biophysical"]) == 1
+        ), f"Expected a matching column name for each substrate across all parameter tables. {substrate_to_header[substrate]['biophysical']}"
+        # Extract that column from the list
+        substrate_to_header[substrate]["biophysical"] = substrate_to_header[substrate][
+            "biophysical"
+        ][0]
+    for season in result["season_list"]:
+        # Make a list of unique columns
+        season_to_header[season]["biophysical"] = list(
+            set(season_to_header[season]["biophysical"])
+        )
+        # Ensure that list only contains one column
+        assert (
+            len(season_to_header[season]["biophysical"]) == 1
+        ), f"Expected a matching column name for each season across all parameter tables. {season_to_header[season]['biophysical']}"
+        # Extract that column from the list
+        season_to_header[season]["biophysical"] = season_to_header[season][
+            "biophysical"
+        ][0]
 
     # Check season_to_header for completeness
     for table_type, lookup_table in season_to_header.items():
@@ -2195,14 +2874,6 @@ def _parse_scenario_variables(
                 f"corresponding entries of '{table_type}' in both the guilds "
                 "and biophysical table."
             )
-
-    result = {}
-    # * season_list (list of string)
-    result["season_list"] = sorted(season_to_header)
-    # * substrate_list (list of string)
-    result["substrate_list"] = sorted(substrate_to_header)
-    # * species_list (list of string)
-    result["species_list"] = sorted(guild_df.index)
 
     result["alpha_value"] = dict()
     for species in result["species_list"]:

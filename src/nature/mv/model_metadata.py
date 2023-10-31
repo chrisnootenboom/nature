@@ -32,6 +32,11 @@ NCI_METADATA = {
         pyname="nature.mv.nci_ndr",
         aliases=(),
     ),
+    "urban_cooling_mv": _MODELMETA_NCI(
+        model_title="Urban Cooling Marginal Value",
+        pyname="nature.mv.nci_urban_cooling",
+        aliases=(),
+    ),
 }
 
 INVEST_METADATA = {
