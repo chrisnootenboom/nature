@@ -434,10 +434,10 @@ def flat_disk_kernel_raster(kernel_filepath: pathlike, max_distance: int):
         None
 
     """
-    LOGGER.info(
+    logger.info(
         f"Creating a disk kernel of distance {max_distance} at " f"{kernel_filepath}"
     )
-    kernel_size = int(numpy.round(max_distance * 2 + 1))
+    kernel_size = int(np.round(max_distance * 2 + 1))
     kernel_filepath = str(kernel_filepath)
 
     driver = gdal.GetDriverByName("GTiff")
@@ -483,15 +483,97 @@ def flat_disk_kernel_raster(kernel_filepath: pathlike, max_distance: int):
             # Numpy creates index rasters as ints by default, which sometimes
             # creates problems on 32-bit builds when we try to add Int32
             # matrices to float64 matrices.
-            row_indices, col_indices = numpy.indices(
+            row_indices, col_indices = np.indices(
                 (row_block_width, col_block_width), dtype=float
             )
 
             row_indices += float(row_offset - max_distance)
             col_indices += float(col_offset - max_distance)
 
-            kernel_index_distances = numpy.hypot(row_indices, col_indices)
+            kernel_index_distances = np.hypot(row_indices, col_indices)
             kernel = kernel_index_distances < max_distance
+
+            kernel_band.WriteArray(kernel, xoff=col_offset, yoff=row_offset)
+
+    # Need to flush the kernel's cache to disk before opening up a new Dataset
+    # object in interblocks()
+    kernel_dataset.FlushCache()
+
+
+def flat_square_kernel_raster(kernel_filepath: pathlike, max_distance: int):
+    """Create a flat disk  kernel.
+
+    The raster created will be a tiled GeoTiff, with 256x256 memory blocks.
+
+    Args:
+        kernel_filepath (pathlike): The path to the file on disk where this
+            kernel should be stored.  If this file exists, it will be
+            overwritten.
+        max_distance (int): The distance (in pixels) of the
+            kernel's radius.
+
+    Returns:
+        None
+
+    """
+    logger.info(
+        f"Creating a disk kernel of distance {max_distance} at " f"{kernel_filepath}"
+    )
+    kernel_size = int(np.round(max_distance * 2 + 1))
+    kernel_filepath = str(kernel_filepath)
+
+    driver = gdal.GetDriverByName("GTiff")
+    kernel_dataset = driver.Create(
+        kernel_filepath.encode("utf-8"),
+        kernel_size,
+        kernel_size,
+        1,
+        gdal.GDT_Byte,
+        options=["BIGTIFF=IF_SAFER", "TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"],
+    )
+
+    # Make some kind of geotransform and SRS. It doesn't matter what, but
+    # having one will make GIS libraries behave better if it's all defined
+    kernel_dataset.SetGeoTransform([0, 1, 0, 0, 0, -1])
+    srs = osr.SpatialReference()
+    srs.SetWellKnownGeogCS("WGS84")
+    kernel_dataset.SetProjection(srs.ExportToWkt())
+
+    kernel_band = kernel_dataset.GetRasterBand(1)
+    kernel_band.SetNoDataValue(255)
+
+    cols_per_block, rows_per_block = kernel_band.GetBlockSize()
+
+    n_cols = kernel_dataset.RasterXSize
+    n_rows = kernel_dataset.RasterYSize
+
+    n_col_blocks = int(math.ceil(n_cols / float(cols_per_block)))
+    n_row_blocks = int(math.ceil(n_rows / float(rows_per_block)))
+
+    for row_block_index in range(n_row_blocks):
+        row_offset = row_block_index * rows_per_block
+        row_block_width = n_rows - row_offset
+        if row_block_width > rows_per_block:
+            row_block_width = rows_per_block
+
+        for col_block_index in range(n_col_blocks):
+            col_offset = col_block_index * cols_per_block
+            col_block_width = n_cols - col_offset
+            if col_block_width > cols_per_block:
+                col_block_width = cols_per_block
+
+            # Numpy creates index rasters as ints by default, which sometimes
+            # creates problems on 32-bit builds when we try to add Int32
+            # matrices to float64 matrices.
+            row_indices, col_indices = np.indices(
+                (row_block_width, col_block_width), dtype=float
+            )
+
+            row_indices += float(row_offset - max_distance)
+            col_indices += float(col_offset - max_distance)
+
+            kernel_index_distances = np.hypot(row_indices, col_indices)
+            kernel = kernel_index_distances > -1
 
             kernel_band.WriteArray(kernel, xoff=col_offset, yoff=row_offset)
 

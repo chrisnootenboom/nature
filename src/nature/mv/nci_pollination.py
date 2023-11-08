@@ -1,16 +1,22 @@
 import hashlib
 import inspect
 import logging
-import numpy as np
 import collections
 import re
 from pathlib import Path
+import tempfile
+import shutil
+
+import numpy as np
+
 from osgeo import gdal, ogr
 
 from natcap.invest import utils, spec_utils
 from natcap.invest.unit_registry import u
 import pygeoprocessing
+from pygeoprocessing.geoprocessing_core import DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS
 import taskgraph
+
 
 from .. import nature
 from .. import rasterops
@@ -595,7 +601,6 @@ def execute(args):
         ownership_vector_path = ownership_dir / (
             _PROJECTED_OWNERSHIP_VECTOR_FILE_PATTERN % basic_file_suffix
         )
-        ownership_mask_task_list = {}
     else:
         ownership_vector_path = None
 
@@ -940,6 +945,28 @@ def execute(args):
                 species
             ] = perceived_annual_floral_index_path
 
+            # Define pixel size
+        try:
+            (
+                original_landcover_mean_pixel_size,
+                original_landcover_pixel_area,
+            ) = utils.mean_pixel_size_and_area(landcover_raster_info["pixel_size"])
+        except ValueError:
+            original_landcover_mean_pixel_size = np.min(
+                np.absolute(landcover_raster_info["pixel_size"])
+            )
+            original_landcover_pixel_area = utils.mean_pixel_size_and_area(
+                landcover_raster_info["pixel_size"]
+            )[1]
+            LOGGER.debug(
+                "Land Cover Raster has unequal x, y pixel sizes: %s. Using"
+                "%s as the mean pixel size."
+                % (
+                    landcover_raster_info["pixel_size"],
+                    original_landcover_mean_pixel_size,
+                )
+            )
+
         # Aggregate raster data if necessary
         if args["aggregate_size"] not in [None, ""]:
             LOGGER.info(
@@ -1031,22 +1058,25 @@ def execute(args):
             ] = perceived_annual_floral_index_task_map[scenario_name]
             landcover_pixel_size_tuple = landcover_raster_info["pixel_size"]
 
+        # Define pixel size
+        try:
+            (
+                landcover_mean_pixel_size,
+                landcover_pixel_area,
+            ) = utils.mean_pixel_size_and_area(landcover_pixel_size_tuple)
+        except ValueError:
+            landcover_mean_pixel_size = np.min(np.absolute(landcover_pixel_size_tuple))
+            landcover_pixel_area = utils.mean_pixel_size_and_area(
+                landcover_pixel_size_tuple
+            )[1]
+            LOGGER.debug(
+                "Land Cover Raster has unequal x, y pixel sizes: %s. Using"
+                "%s as the mean pixel size."
+                % (landcover_pixel_size_tuple, landcover_mean_pixel_size)
+            )
+
         # Iterate through species and calculate marginal values and baseline landscape score and visitation
         for species in scenario_variables["species_list"]:
-            # Define pixel size
-            try:
-                landcover_mean_pixel_size = utils.mean_pixel_size_and_area(
-                    landcover_pixel_size_tuple
-                )[0]
-            except ValueError:
-                landcover_mean_pixel_size = np.min(
-                    np.absolute(landcover_pixel_size_tuple)
-                )
-                LOGGER.debug(
-                    "Land Cover Raster has unequal x, y pixel sizes: %s. Using"
-                    "%s as the mean pixel size."
-                    % (landcover_pixel_size_tuple, landcover_mean_pixel_size)
-                )
             # create a convolution kernel for the species flight range
             LOGGER.info(
                 f"{scenario_name} | Creating convolution kernel for species: {species}"
@@ -1478,9 +1508,8 @@ def execute(args):
             ] = half_saturation_coefficient_raster_path
 
             # Convert crop value per hectare to per pixel
-            pixel_area = abs(np.prod(landcover_pixel_size_tuple))
             crop_value_per_pixel_dict = {
-                lulc_id: crop_value * pixel_area / 10**4
+                lulc_id: crop_value * original_landcover_pixel_area / 10**4
                 for lulc_id, crop_value in scenario_variables["crop_value"][
                     scenario_name
                 ].items()
@@ -1971,61 +2000,13 @@ def execute(args):
 
                 # TODO implement masking by owner to partition public/private benefit
 
+                # TODO add discount rate and years to calculate net present value
+
                 if ownership_vector_path is not None:
-                    # Mask by ownership data
-                    LOGGER.info(f"{scenario_name} | Masking by ownership data")
-                    delta_annual_yield_by_visitation_by_ownership_raster_path_list = [
-                        str(
-                            ownership_dir
-                            / (
-                                _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
-                                % (nature.strip_string(owner), file_suffix)
-                            )
-                        )
-                        for owner in scenario_variables["owner_list"]
-                    ]
-                    delta_annual_yield_by_visitation_by_ownership_raster_path_dict = {
-                        nature.strip_string(owner): ownership_dir
-                        / (
-                            _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
-                            % (nature.strip_string(owner), file_suffix)
-                        )
-                        for owner in scenario_variables["owner_list"]
-                    }
-
-                    ownership_mask_task_list[scenario_name] = task_graph.add_task(
-                        task_name=f"rasterize_ownership_data_{scenario_name}",
-                        func=mask_by_owners_op,
-                        args=(
-                            [
-                                str(ownership_vector_path),
-                                _OWNERSHIP_FIELD,
-                                scenario_variables["owner_list"],
-                                file_suffix,
-                                str(
-                                    scenario_variables[
-                                        "delta_annual_yield_by_visitation_raster_path"
-                                    ][scenario_name]
-                                ),
-                                str(ownership_dir),
-                            ]
-                        ),
-                        target_path_list=delta_annual_yield_by_visitation_by_ownership_raster_path_list,
-                        dependent_task_list=[
-                            reproject_ownership_task,
-                            delta_annual_yield_by_visitation_tasks[scenario_name],
-                        ],
-                    )
-                    scenario_variables[
-                        "delta_annual_yield_by_visitation_by_ownership_raster_path"
-                    ][
-                        scenario_name
-                    ] = delta_annual_yield_by_visitation_by_ownership_raster_path_dict
-
                     # Calculating private vs public change in yield.
-                    # TODO Change filepaths to reflect ownership
-                    for owner in scenario_variables["owner_list"]:
-                        owner = nature.strip_string(owner)
+                    # [x] TODO Change filepaths to reflect ownership
+                    for owner_raw in scenario_variables["owner_list"]:
+                        owner = nature.strip_string(owner_raw)
                         LOGGER.debug(
                             f"{scenario_name} | {owner} | Calculating Private Crop Yield Marginal Value raster | By landscape score (convolve)"
                         )
@@ -2038,36 +2019,29 @@ def execute(args):
                             scenario_name
                         ][owner] = task_graph.add_task(
                             task_name=f"calculate_delta_yield_by_landscape_score_{scenario_name}_{owner}",
-                            func=pygeoprocessing.convolve_2d,
+                            func=delta_annual_yield_by_landscape_score_by_ownership_op,
                             args=(
                                 [
-                                    (
-                                        str(
-                                            scenario_variables[
-                                                "delta_annual_yield_by_visitation_by_ownership_raster_path"
-                                            ][scenario_name][owner]
-                                        ),
-                                        1,
-                                    ),
-                                    (str(kernel_path), 1),
-                                    str(
-                                        delta_annual_yield_by_landscape_score_by_ownership_raster_path
-                                    ),
+                                    ownership_vector_path,
+                                    _OWNERSHIP_FIELD,
+                                    owner_raw,
+                                    kernel_path,
+                                    delta_annual_yield_by_landscape_score_by_ownership_raster_path,
+                                    file_suffix,
+                                    scenario_variables[
+                                        "delta_annual_yield_by_visitation_raster_path"
+                                    ][scenario_name],
+                                    ownership_dir,
                                 ]
                             ),
-                            kwargs={
-                                "ignore_nodata_and_edges": True,
-                                "mask_nodata": True,
-                                "normalize_kernel": False,
-                                "target_nodata": _INDEX_NODATA,
-                            },
                             target_path_list=[
                                 str(
                                     delta_annual_yield_by_landscape_score_by_ownership_raster_path
                                 )
                             ],
                             dependent_task_list=[
-                                ownership_mask_task_list[scenario_name]
+                                reproject_ownership_task,
+                                delta_annual_yield_by_visitation_tasks[scenario_name],
                             ],
                         )
 
@@ -2089,54 +2063,27 @@ def execute(args):
                             )
                         )
 
+                        # TODO add another mask
+
                         delta_annual_yield_by_ownership_tasks[scenario_name][
                             owner
                         ] = task_graph.add_task(
                             task_name=f"calculate_delta_yield_{scenario_name}_{owner}",
-                            func=pygeoprocessing.raster_calculator,
+                            func=delta_yield_habitat_func,
                             args=(
                                 [
-                                    (
-                                        str(
-                                            scenario_variables[
-                                                "delta_annual_yield_by_landscape_score_by_ownership_raster_path"
-                                            ][scenario_name][owner]
-                                        ),
-                                        1,
-                                    ),
-                                    (
-                                        str(
-                                            scenario_variables[
-                                                "d_pollinator_landscape_score_path"
-                                            ][scenario_name]
-                                        ),
-                                        1,
-                                    ),
-                                    (
-                                        pygeoprocessing.get_raster_info(
-                                            str(
-                                                scenario_variables[
-                                                    "delta_annual_yield_by_landscape_score_by_ownership_raster_path"
-                                                ][scenario_name][owner]
-                                            )
-                                        )["nodata"][0],
-                                        "raw",
-                                    ),
-                                    (
-                                        pygeoprocessing.get_raster_info(
-                                            str(
-                                                scenario_variables[
-                                                    "d_pollinator_landscape_score_path"
-                                                ][scenario_name]
-                                            )
-                                        )["nodata"][0],
-                                        "raw",
-                                    ),
-                                ],
-                                delta_yield_habitat_op,
-                                str(delta_annual_yield_by_ownership_raster_path),
-                                gdal.GDT_Float32,
-                                _INDEX_NODATA,
+                                    scenario_variables[
+                                        "delta_annual_yield_by_landscape_score_by_ownership_raster_path"
+                                    ][scenario_name][owner],
+                                    scenario_variables[
+                                        "d_pollinator_landscape_score_path"
+                                    ][scenario_name],
+                                    ownership_vector_path,
+                                    _OWNERSHIP_FIELD,
+                                    owner_raw,
+                                    ownership_dir,
+                                    delta_annual_yield_by_ownership_raster_path,
+                                ]
                             ),
                             target_path_list=[
                                 str(delta_annual_yield_by_ownership_raster_path)
@@ -2606,44 +2553,127 @@ def yield_op(
 def delta_yield_habitat_op(
     delta_yield_by_delta_landscape_score_array,
     delta_landscape_score_array,
-    delta_yield_by_delta_landscape_score_nodata,
-    delta_landscape_score_nodata,
-    # yield_array,
+    delta_annual_yield_by_landscape_score_by_ownership_raster_nodata,
+    d_pollinator_landscape_score_nodata,
 ):
-    """Calculate change in yields by habitat = dy_dpls * dpls_dhab * y
+    """Calculate change in yields by habitat = dy_dpls * dpls_dhab * ownership_mask_array
     where:
         dy_dpls = delta yield over delta landscape score
         dpls_dhab = delta landscape score over delta habitat
-        y = baseline crop yield
+        ownership_mask_array = ownership mask
     """
-    # QUESTION: Why is there an old version multiplied by Yield? I believe we decided to not do this but good to note.
-
     result = np.empty_like(delta_yield_by_delta_landscape_score_array)
     result[:] = _INDEX_NODATA
 
     valid_mask = np.logical_and.reduce(
         (
             delta_yield_by_delta_landscape_score_array
-            != delta_yield_by_delta_landscape_score_nodata,
-            delta_landscape_score_array != delta_landscape_score_nodata,
-            # yield_array != _INDEX_NODATA,
+            != delta_annual_yield_by_landscape_score_by_ownership_raster_nodata,
+            delta_landscape_score_array != d_pollinator_landscape_score_nodata,
         )
     )
 
     dy_dpls = delta_yield_by_delta_landscape_score_array[valid_mask]
     dpls_dhab = delta_landscape_score_array[valid_mask]
-    # y = yield_array[valid_mask]
 
-    # result[valid_mask] = dy_dpls * dpls_dhab * y
     result[valid_mask] = dy_dpls * dpls_dhab
 
     return result
 
 
-def mask_by_owners_op(
+def delta_yield_habitat_func(
+    delta_annual_yield_by_landscape_score_by_ownership_raster_path,
+    d_pollinator_landscape_score_path,
     ownership_vector_path,
     owner_field,
-    owner_list,
+    owner,
+    working_dir,
+    delta_annual_yield_by_ownership_raster_path,
+):
+    """Calculate change in yields by habitat = dy_dpls * dpls_dhab (masked by ownership_mask_array)"""
+    # Mask raster functions adapted from pygeoprocessing.mask_raster()
+    with tempfile.NamedTemporaryFile(
+        prefix="mask_raster", delete=False, suffix=".tif", dir=working_dir
+    ) as mask_raster_file:
+        mask_raster_path = mask_raster_file.name
+
+    pygeoprocessing.new_raster_from_base(
+        str(delta_annual_yield_by_landscape_score_by_ownership_raster_path),
+        str(mask_raster_path),
+        gdal.GDT_Byte,
+        [255],
+        fill_value_list=[0],
+        raster_driver_creation_tuple=DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS,
+    )
+
+    pygeoprocessing.rasterize(
+        str(ownership_vector_path),
+        str(mask_raster_path),
+        burn_values=[1],
+        layer_id=0,
+        option_list=["ALL_TOUCHED=FALSE"],
+        where_clause=f"{owner_field} = '{owner}'",
+    )
+
+    # Get nodata values
+    delta_annual_yield_by_landscape_score_by_ownership_raster_nodata = (
+        pygeoprocessing.get_raster_info(
+            str(delta_annual_yield_by_landscape_score_by_ownership_raster_path)
+        )["nodata"][0]
+    )
+    d_pollinator_landscape_score_nodata = pygeoprocessing.get_raster_info(
+        str(d_pollinator_landscape_score_path)
+    )["nodata"][0]
+
+    def delta_yield_habitat_owner_op(
+        delta_yield_by_delta_landscape_score_array,
+        delta_landscape_score_array,
+        ownership_mask_array,
+    ):
+        """Calculate change in yields by habitat = dy_dpls * dpls_dhab * ownership_mask_array
+        where:
+            dy_dpls = delta yield over delta landscape score
+            dpls_dhab = delta landscape score over delta habitat
+            ownership_mask_array = ownership mask
+        """
+        result = np.empty_like(delta_yield_by_delta_landscape_score_array)
+        result[:] = _INDEX_NODATA
+
+        valid_mask = np.logical_and.reduce(
+            (
+                delta_yield_by_delta_landscape_score_array
+                != delta_annual_yield_by_landscape_score_by_ownership_raster_nodata,
+                delta_landscape_score_array != d_pollinator_landscape_score_nodata,
+                ownership_mask_array != 0,
+            )
+        )
+
+        dy_dpls = delta_yield_by_delta_landscape_score_array[valid_mask]
+        dpls_dhab = delta_landscape_score_array[valid_mask]
+
+        result[valid_mask] = dy_dpls * dpls_dhab
+
+        return result
+
+    pygeoprocessing.raster_calculator(
+        [
+            (str(delta_annual_yield_by_landscape_score_by_ownership_raster_path), 1),
+            (str(d_pollinator_landscape_score_path), 1),
+            (str(mask_raster_path), 1),
+        ],
+        delta_yield_habitat_owner_op,
+        str(delta_annual_yield_by_ownership_raster_path),
+        gdal.GDT_Float32,
+        _INDEX_NODATA,
+    )
+
+
+def delta_annual_yield_by_landscape_score_by_ownership_op(
+    ownership_vector_path,
+    owner_field,
+    owner,
+    kernel_path,
+    delta_annual_yield_by_landscape_score_by_ownership_raster_path,
     file_suffix,
     base_raster_path,
     temp_dir,
@@ -2652,32 +2682,76 @@ def mask_by_owners_op(
     base_raster_path = Path(base_raster_path)
     temp_dir = Path(temp_dir)
 
-    if not all(
-        [
-            (
-                temp_dir
-                / (
-                    _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
-                    % (nature.strip_string(owner), file_suffix)
-                )
-            ).is_file()
-            for owner in owner_list
-        ]
-    ):
-        for owner in owner_list:
-            pygeoprocessing.mask_raster(
-                (str(base_raster_path), 1),
-                str(ownership_vector_path),
-                str(
-                    temp_dir
-                    / (
-                        _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
-                        % (nature.strip_string(owner), file_suffix)
-                    )
-                ),
-                working_dir=str(temp_dir),
-                where_clause=f"{owner_field}  = '{owner}'",
-            )
+    # Create tempdir
+    temporary_working_dir = Path(tempfile.mkdtemp(dir=temp_dir))
+
+    # Mask by ownership data
+    ownership_mask = temporary_working_dir / (
+        _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
+        % (nature.strip_string(owner), file_suffix)
+    )
+    pygeoprocessing.mask_raster(
+        (str(base_raster_path), 1),
+        str(ownership_vector_path),
+        str(ownership_mask),
+        target_mask_value=0,
+        working_dir=str(temporary_working_dir),
+        where_clause=f"{owner_field}  = '{owner}'",
+    )
+
+    # Calculate delta yield by landscape score
+    pygeoprocessing.convolve_2d(
+        (str(ownership_mask), 1),
+        (str(kernel_path), 1),
+        str(delta_annual_yield_by_landscape_score_by_ownership_raster_path),
+        ignore_nodata_and_edges=True,
+        mask_nodata=True,
+        normalize_kernel=False,
+        target_nodata=_INDEX_NODATA,
+    )
+
+    # Remove tempdir
+    shutil.rmtree(temporary_working_dir)
+
+
+# def mask_by_owners_op(
+#     ownership_vector_path,
+#     owner_field,
+#     owner_list,
+#     file_suffix,
+#     base_raster_path,
+#     temp_dir,
+# ):
+#     # Ensure paths
+#     base_raster_path = Path(base_raster_path)
+#     temp_dir = Path(temp_dir)
+
+#     if not all(
+#         [
+#             (
+#                 temp_dir
+#                 / (
+#                     _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
+#                     % (nature.strip_string(owner), file_suffix)
+#                 )
+#             ).is_file()
+#             for owner in owner_list
+#         ]
+#     ):
+#         for owner in owner_list:
+#             pygeoprocessing.mask_raster(
+#                 (str(base_raster_path), 1),
+#                 str(ownership_vector_path),
+#                 str(
+#                     temp_dir
+#                     / (
+#                         _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN
+#                         % (nature.strip_string(owner), file_suffix)
+#                     )
+#                 ),
+#                 working_dir=str(temp_dir),
+#                 where_clause=f"{owner_field}  = '{owner}'",
+#             )
 
 
 def _parse_scenario_variables(
@@ -2718,7 +2792,7 @@ def _parse_scenario_variables(
     )
 
     if "ownership_vector_path" in args and args["ownership_vector_path"] != "":
-        ownership_vector_path = args["ownership_vector_path"]
+        ownership_vector_path = str(args["ownership_vector_path"])
     else:
         ownership_vector_path = None
 
@@ -2798,7 +2872,9 @@ def _parse_scenario_variables(
         if ownership_layer.GetGeomType() not in [ogr.wkbPolygon, ogr.wkbMultiPolygon]:
             ownership_layer = None
             ownership_vector = None
-            raise ValueError("Ownership layer not a polygon type")
+            raise ValueError(
+                f"Ownership layer not a polygon type ({ogr.GeometryTypeToName(ownership_layer.GetGeomType())}"
+            )
         ownership_layer_defn = ownership_layer.GetLayerDefn()
         ownership_headers = [
             ownership_layer_defn.GetFieldDefn(i).GetName()

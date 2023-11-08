@@ -3,6 +3,12 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# Mac stuff
+.DS_Store
+
+# Jupyter
+*.ipynb_checkpoints/
+
 # User-specific files
 *.rsuser
 *.suo
