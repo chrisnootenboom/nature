@@ -2,6 +2,7 @@ from pathlib import Path
 import typing
 import hashlib
 import inspect
+import itertools
 
 import numpy as np
 
@@ -65,6 +66,55 @@ class SubtractTwoRasters(object):
         ) & ~natcap.invest.utils.array_equals_nodata(array2, self.nodata)
 
         result[valid_mask] = array1[valid_mask] - array2[valid_mask]
+
+        return result
+
+
+class CombineRasterCategories(object):
+    """Combine all rasters based on their categorical data.
+    Assumes the same nodata value for all raster inputs.
+    """
+
+    def __init__(self, nodata_val, *array_values_list):
+        self.nodata = nodata_val
+        self.array_values = array_values_list
+        # try to get the source code of __call__ so task graph will recompute
+        # if the function has changed
+        try:
+            self.__name__ = hashlib.sha1(
+                inspect.getsource(CombineRasterCategories.__call__).encode("utf-8")
+            ).hexdigest()
+        except IOError:
+            # default to the classname if it doesn't work
+            self.__name__ = CombineRasterCategories.__name__
+
+    def __call__(self, *array_list):
+        """Create multiple categorical raster overlay with minimum raster int type."""
+        combinations_dict = {
+            sum([k * (10**j) for j, k in enumerate(combo)]): i + 1
+            for i, combo in enumerate(itertools.product(*self.array_values))
+        }
+
+        valid_mask = np.zeros(array_list[0].shape, dtype=bool)
+        temp = np.empty_like(array_list[0], dtype=np.dtype("int16"))
+        temp[:] = 0
+        num_digits = 0
+        for i, array in enumerate(array_list):
+            local_valid_mask = ~natcap.invest.utils.array_equals_nodata(
+                array, self.nodata
+            )
+            temp[local_valid_mask] += array.astype("int")[local_valid_mask] * (
+                10**num_digits
+            )
+            valid_mask &= local_valid_mask  # ANY nodata makes the result nodata
+            num_digits += len(str(int(np.max(array[local_valid_mask]))))
+        temp[~valid_mask] = self.nodata
+
+        result = np.empty_like(temp)
+        result[:] = self.nodata
+        for key, value in combinations_dict.items():
+            index = np.where(temp == key)
+            result[index] = value
 
         return result
 

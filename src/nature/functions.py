@@ -1,4 +1,5 @@
 import math
+import pandas as pd
 
 
 def generalized_logistic(
@@ -94,3 +95,28 @@ def gompertz(x: float, a: float, b: float, c: float):
         float: The output of the Gompertz function for value x
     """
     return a * math.exp(-b * math.exp(-c * x))
+
+
+def grouped_weighted_avg(
+    values: pd.Series, weights: pd.Series, by: pd.Series | bool = False
+) -> float | pd.Series:
+    """
+    Function to calculate a weighted average, with optional functionality to perform a grouped weighted average
+
+    Parameters:
+        values (pd.Series): values to average
+        weights (pd.Series): weights corresponding to values
+        by (pd.Series or bool): optional categorical grouping series to bin values and weights. Defaults to False (will not run)
+
+    Returns:
+        float or pd.Series: the weighted average (single value or pd.Series grouped by category)
+    """
+    if by:
+        return (values.fillna(0) * weights.fillna(0)).groupby(
+            by
+        ).sum() / weights.fillna(0).groupby(by).sum()
+    else:
+        return (values.fillna(0) * weights.fillna(0)).sum() / weights.fillna(0).sum()
+
+
+# def equity_covariance():

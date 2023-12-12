@@ -4,12 +4,14 @@ import typing
 from typing import List, Set, Dict, Tuple, Optional
 import tempfile
 import shutil
+import pickle
 
 import requests
 import xmltodict
 from bs4 import BeautifulSoup
 
 import math
+import random
 import pandas as pd
 import numpy as np
 import pint
@@ -50,17 +52,68 @@ pathlike = str | Path
 # NOTE The main thing is to inherit NoData from the input raster. If changing raster dtype, then check if nodata fits in new dtype.
 
 
-def message(*message_list):
+def message(*messages: str) -> str:
     # TODO LOGGER STUFF
     """Format a list of messages for logging.
 
     Args:
-        *args: Any number of messages to print.
+        *messages: Any number of messages to print.
+
+    Returns:
+        str: A formatted string of messages.
     """
-    return " | ".join([str(message) for message in message_list])
+    return " | ".join([str(message) for message in messages])
 
 
-def strip_string(string):
+def geospatial_export(
+    gdf: gpd.GeoDataFrame, file_name: str, workspace_dir: Path
+) -> Tuple[Path, Path]:
+    """Export a GeoDataFrame to shapefile and geopackage.
+
+    Args:
+        gdf (gpd.GeoDataFrame): The GeoDataFrame to export.
+        file_name (str): The name of the file to export.
+        workspace_dir (pathlib.Path): The directory to export to.
+
+    Returns:
+        tuple: The paths to the shapefile and geopackage.
+    """
+    output_shp = workspace_dir / f"{file_name}.shp"
+    output_gpkg = workspace_dir / f"{file_name}.gpkg"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gdf.to_file(output_shp)
+        gdf.to_file(output_gpkg, driver="GPKG")
+
+    return output_shp, output_gpkg
+
+
+def random_hex_color(num_colors: int = 1) -> list:
+    """Generate a number of random hex colors.
+
+    Args:
+        num_colors (int): Number of colors to generate, defaults to 1.
+
+    Returns:
+        list: A list of random hex color strings.
+    """
+
+    return [
+        "#" + "".join([random.choice("0123456789ABCDEF") for x in range(6)])
+        for i in range(num_colors)
+    ]
+
+
+def strip_string(string: str) -> str:
+    """Strip string of non-alphanumeric characters
+
+    Args:
+        string (str): String to strip
+
+    Returns:
+        str: Stripped string
+    """
     return "".join([x if x.isalnum() else "_" if x == " " else "" for x in string])
 
 
@@ -68,7 +121,7 @@ def scenario_labeling(
     args: dict,
     baseline_args: list,
     baseline_scenario_label: str = "baseline",
-):
+) -> Tuple[list, dict]:
     """A function that takes all possible scenario-ized args, organizes them, duplicates baseline args if
     the scenario args do not exist, then produces a standard dict structure expected by all NCI Marginal Value
     models.
@@ -82,8 +135,7 @@ def scenario_labeling(
         baseline_scenario_label (string, optional): String label for baseline results. Defaults to "baseline".
 
     Returns:
-        list: Scenario names for labeling
-        list: Ordered list of lists of scenario args
+        tuple: scenario_name_list, scenario_args_dict
     """
 
     # First check if there are any scenario args to analyze, else return just the baseline args
@@ -179,11 +231,13 @@ def scenario_labeling(
     return scenario_name_list, scenario_args_dict
 
 
-def mosaic_raster(raster_list: list, output_path: pathlike) -> None:
+def mosaic_rasters(
+    raster_path_list: List[Path], output_path: Path, nodata_val: int | float
+) -> None:
     """A function to mosaic a list of rasters
 
     Args:
-        raster_list (list): List of rasters to mosaic
+        raster_list (list): List of pathlike rasters to mosaic
         output_path (pathlib.Path): Path to output mosaic raster
 
     Returns:
@@ -191,7 +245,7 @@ def mosaic_raster(raster_list: list, output_path: pathlike) -> None:
     """
 
     raster_to_mosaic = []
-    for p in raster_list:
+    for p in raster_path_list:
         raster = rio.open(p)
         raster_to_mosaic.append(raster)
     mosaic, output_transform = merge(raster_to_mosaic)
@@ -202,6 +256,7 @@ def mosaic_raster(raster_list: list, output_path: pathlike) -> None:
             "height": mosaic.shape[1],
             "width": mosaic.shape[2],
             "transform": output_transform,
+            "nodata": nodata_val,
         }
     )
     with rio.open(output_path, "w", **output_meta) as m:
@@ -209,13 +264,15 @@ def mosaic_raster(raster_list: list, output_path: pathlike) -> None:
 
 
 def sjoin_largest_intersection(
-    target_gdf: pathlike, join_gdf: pathlike, join_fields_list: list = None
-):
+    target_gdf: gpd.GeoDataFrame,
+    join_gdf: gpd.GeoDataFrame,
+    join_fields_list: list = None,
+) -> gpd.GeoDataFrame:
     """Spatial join retaining information from the feature with the largest overlap
 
     Args:
         target_gdf (gpd.GeoDataFrame): GeoDataFrame to which to join
-        join_gdf (list): GeoDataFrame to join
+        join_gdf (gpd.GeoDataFrame): GeoDataFrame to join
         join_fields_list (optional, list): List of fields to join
 
     Returns:
@@ -281,10 +338,10 @@ def sjoin_largest_intersection(
 
 
 def sjoin_representative_points(
-    target_gdf,
-    join_gdf_list,
-    join_fields_list_list,
-):
+    target_gdf: gpd.GeoDataFrame,
+    join_gdf_list: List[gpd.GeoDataFrame],
+    join_fields_list_list: List[List[str]],
+) -> gpd.GeoDataFrame:
     """Spatial join using representative points
 
     Args:
@@ -400,7 +457,16 @@ def distance_to_pixels(
     return landcover_mean_pixel_size
 
 
-def get_mean_pixel_size_and_area(raster_path):
+def get_mean_pixel_size_and_area(raster_path: pathlike) -> Tuple[float, float]:
+    """Get the mean pixel size and area of a raster.
+
+    Args:
+        raster_path (pathlike): The path to the raster.
+
+    Returns:
+        tuple: The mean pixel size and area of the raster.
+    """
+
     raster_info = pygeoprocessing.get_raster_info(str(raster_path))
     pixel_size_tuple = raster_info["pixel_size"]
     try:
@@ -418,8 +484,8 @@ def get_mean_pixel_size_and_area(raster_path):
     return mean_pixel_size, pixel_area
 
 
-def flat_disk_kernel_raster(kernel_filepath: pathlike, max_distance: int):
-    """Create a flat disk  kernel.
+def flat_disk_kernel_raster(kernel_filepath: pathlike, max_distance: int) -> None:
+    """Create a flat disk kernel.
 
     The raster created will be a tiled GeoTiff, with 256x256 memory blocks.
 
@@ -500,8 +566,8 @@ def flat_disk_kernel_raster(kernel_filepath: pathlike, max_distance: int):
     kernel_dataset.FlushCache()
 
 
-def flat_square_kernel_raster(kernel_filepath: pathlike, max_distance: int):
-    """Create a flat disk  kernel.
+def flat_square_kernel_raster(kernel_filepath: pathlike, max_distance: int) -> None:
+    """Create a flat square kernel.
 
     The raster created will be a tiled GeoTiff, with 256x256 memory blocks.
 
@@ -509,8 +575,7 @@ def flat_square_kernel_raster(kernel_filepath: pathlike, max_distance: int):
         kernel_filepath (pathlike): The path to the file on disk where this
             kernel should be stored.  If this file exists, it will be
             overwritten.
-        max_distance (int): The distance (in pixels) of the
-            kernel's radius.
+        max_distance (int): The distance (in pixels) of the kernel's radius.
 
     Returns:
         None
@@ -728,9 +793,10 @@ def convolve_2d_by_exponential(
         tempfile.mkdtemp(dir=target_convolve_raster_path.parent)
     )
     exponential_kernel_path = temporary_working_dir / "exponential_decay_kernel.tif"
-    pygeoprocessing.kernels.exponential_decay_kernel()
-    natcap.invest.utils.exponential_decay_kernel_raster(
-        decay_kernel_distance, str(exponential_kernel_path)
+    pygeoprocessing.kernels.exponential_decay_kernel(
+        str(exponential_kernel_path),
+        decay_kernel_distance,
+        decay_kernel_distance * 5,
     )
     pygeoprocessing.convolve_2d(
         (str(signal_raster_path), 1),
@@ -748,7 +814,7 @@ def convolve_2d_by_logistic(
     target_convolve_raster_path: pathlike,
     terminal_kernel_distance: float,
     decay_start_distance: int | float = 0,
-):
+) -> None:
     """Convolve signal by an logistic decay of a given radius and start distance.
 
     Args:
@@ -790,16 +856,17 @@ def convolve_2d_by_logistic(
     shutil.rmtree(temporary_working_dir)
 
 
-# TODO create convolve by linear function
 def convolve_2d_by_flat(
     signal_raster_path: pathlike,
     target_convolve_raster_path: pathlike,
     terminal_distance: int | float,
-    normalize: bool = True,
     radial: bool = False,
-):
+    ignore_nodata_and_edges: bool = False,
+    mask_nodata: bool = False,
+    normalize: bool = True,
+) -> None:
     # TODO check with the software team to see how to do a focal stats density function
-    """Convolve signal by an flat kernal (either square or circular) with a
+    """Convolve signal by an flat kernel (either square or circular) with a
     defined radial distance.
 
     Args:
@@ -828,26 +895,33 @@ def convolve_2d_by_flat(
         else f"Starting a {int(terminal_distance)}-pixel flat square convolution over {signal_raster_path}"
     )
     logger.debug(logger_message)
-    temporary_working_dir = Path(
-        tempfile.mkdtemp(dir=target_convolve_raster_path.parent)
-    )
-    flat_kernel_path = temporary_working_dir / "flat_kernel.tif"
-    flat_kernel_raster(flat_kernel_path, terminal_distance, radial=radial)
+    with tempfile.NamedTemporaryFile(
+        prefix="flat_kernel",
+        delete=False,
+        suffix=".tif",
+        dir=target_convolve_raster_path.parent,
+    ) as flat_kernel_file:
+        flat_kernel_path = Path(flat_kernel_file.name)
+
+    if radial:
+        flat_disk_kernel_raster(flat_kernel_path, terminal_distance)
+    else:
+        flat_square_kernel_raster(flat_kernel_path, terminal_distance)
     pygeoprocessing.convolve_2d(
         (str(signal_raster_path), 1),
         (str(flat_kernel_path), 1),
         str(target_convolve_raster_path),
         working_dir=str(temporary_working_dir),
-        ignore_nodata_and_edges=True,
-        mask_nodata=False,
+        ignore_nodata_and_edges=ignore_nodata_and_edges,
+        mask_nodata=mask_nodata,
         normalize_kernel=normalize,
     )
-    shutil.rmtree(temporary_working_dir)
+    shutil.rmtree(flat_kernel_path)
 
 
 def booleanize_raster(
     input_raster: pathlike, output_raster: Path, raster_value_list: list
-):
+) -> None:
     """A function to reclassify a raster to boolean based on a list of raster values
     to be considered True.
 
@@ -882,7 +956,19 @@ def reclassify_raster_from_dataframe(
     reclass_df: pd.DataFrame,
     input_column: str,
     output_column: str,
-):
+) -> None:
+    """A function to reclassify a raster based on a dataframe
+
+    Args:
+        input_raster (pathlike): Path to the input raster
+        output_raster (pathlike): Path to the output raster
+        reclass_df (pd.DataFrame): DataFrame with input and output columns
+        input_column (str): Name of input column in reclass_df
+        output_column (str): Name of output column in reclass_df
+
+    Returns:
+        None
+    """
     # Ensure path arguments are Path objects
     input_raster = Path(input_raster)
     output_raster = Path(output_raster)
@@ -923,6 +1009,9 @@ def extract_cdl(
 
     logger.info(f"Extracting {year} CDL data for FIPS {fips}")
 
+    # Ensure path arguments are Path objects
+    temp_dir = Path(temp_dir)
+
     # Get CDL data from NASS as XML link
     nass_xml_url = rf"https://nassgeodata.gmu.edu/axis2/services/CDLService/GetCDLFile?year={year}&fips={fips}"
     r = requests.get(nass_xml_url)
@@ -950,12 +1039,15 @@ def copy_raster_to_new_datatype(
     output_raster_path: pathlike,
     rasterio_dtype: str = rio.int16,
     nodata_val: int | float = None,
-):
+) -> None:
     """A function to copy a raster to a new datatype
 
     Args:
         raster_path (str or pathlib.Path): Path to the input raster
         output_raster_path (pathlib.Path): Path to the output raster
+
+    Returns:
+        None
     """
     # Force pathlib compliance
     raster_path = Path(raster_path)
@@ -975,117 +1067,187 @@ def copy_raster_to_new_datatype(
         dst.write(src_array.astype(rasterio_dtype), 1)
 
 
-def batch_masked_zonal_stats(
-    zonal_raster_list,
-    mask_raster_path,
-    mask_raster_value,
-    zonal_vector_path,
-    temp_workspace_dir,
-    zonal_join_columns=[
+def pickle_zonal_stats(
+    base_vector_path: pathlike,
+    base_raster_path: pathlike,
+    target_pickle_path: pathlike,
+    zonal_join_columns: list = [
         "count",
         "nodata_count",
         "sum",
         "mean",
     ],
-    zonal_raster_labels=None,
-) -> Tuple[List[pd.DataFrame], Path]:
-    """A function to calculate masked zonal statistics for a list of rasters
+    label: str = None,
+) -> None:
+    """Calculate Zonal Stats for a vector/raster pair and pickle result.
 
     Args:
-        static_sampling_raster_list (_type_): _description_
-        mask_raster_path (_type_): _description_
-        zonal_vector_path (_type_): _description_
-        temp_workspace_dir (_type_): _description_
-        zonal_join_columns (list, optional): _description_. Defaults to [ "count", "nodata_count", "sum", "mean", ].
-        zonal_raster_labels (list, optional): Optional labels to ascribe to the zonal stats output. Defaults to None.
+        base_vector_path (pathlike): path to vector file
+        base_raster_path (pathlike): path to raster file to aggregate over.
+        target_pickle_path (pathlike): path to desired target pickle file that will
+            be a pickle of the pygeoprocessing.zonal_stats function.
 
     Returns:
-        List[pd.DataFrame]: List of output zonal statistics dataframes
-        Path: Path to aligned mask raster
+        None.
+
+    """
+    # Ensure path arguments are Path objects
+    base_vector_path = Path(base_vector_path)
+    base_raster_path = Path(base_raster_path)
+    target_pickle_path = Path(target_pickle_path)
+
+    logger.info(
+        f"Taking zonal statistics of {str(base_vector_path)} "
+        f"over {str(base_raster_path)}"
+    )
+    zonal_stats_dict = pygeoprocessing.zonal_statistics(
+        (str(base_raster_path), 1), str(base_vector_path), polygons_might_overlap=True
+    )
+    zonal_stats_df = pd.DataFrame(zonal_stats_dict).transpose()
+    zonal_stats_df.index += -1  # Make sure indices match
+
+    zonal_stats_df["mean"] = zonal_stats_df["sum"] / zonal_stats_df["count"]
+
+    zonal_stats_df = zonal_stats_df[zonal_join_columns]
+    # Rename columns to labels if provided, else raster name
+    if label is not None:
+        zonal_stats_df = zonal_stats_df.rename(
+            columns={col: f"{label}__{col}" for col in zonal_join_columns}
+        )
+    else:
+        zonal_stats_df = zonal_stats_df.rename(
+            columns={
+                col: f"{(base_raster_path).stem}__{col}" for col in zonal_join_columns
+            }
+        )
+
+    with open(target_pickle_path, "wb") as pickle_file:
+        pickle.dump(zonal_stats_df, pickle_file)
+
+
+def batch_pickle_zonal_stats(
+    zonal_raster_list: list,
+    zonal_vector_path: pathlike,
+    pickle_path_list: list,
+    zonal_join_columns_list: List[list] = None,
+    zonal_raster_labels: List[str] = None,
+) -> Tuple[List[pd.DataFrame], Path]:
+    """A function to calculate and pickle zonal statistics for a list of rasters
+
+    Args:
+        zonal_raster_list (list): List of paths to rasters to calculate zonal statistics for
+        zonal_vector_path (pathlike): Path to vector to calculate zonal statistics for
+        zonal_join_columns (list): List of zonal statistics to calculate
+        zonal_raster_labels (list): List of labels for zonal rasters
+
+    Returns:
+        tuple: Tuple of list of zonal statistics dataframes and path to aligned mask raster
     """
 
+    assert len(pickle_path_list) == len(zonal_raster_list), (
+        f"Length of pickle_path_list ({len(pickle_path_list)}) must match "
+        f"length of zonal_raster_list ({len(zonal_raster_list)})."
+    )
     if zonal_raster_labels is not None:
         assert len(zonal_raster_labels) == len(zonal_raster_list), (
             f"Length of zonal_raster_labels ({len(zonal_raster_labels)}) must match "
             f"length of zonal_raster_list ({len(zonal_raster_list)})."
         )
-
-    # Ensure path arguments are Path objects
-    mask_raster_path = Path(mask_raster_path)
-    zonal_vector_path = Path(zonal_vector_path)
-    temp_workspace_dir = Path(temp_workspace_dir)
-
-    zonal_stats_list = []
-    aligned_mask_raster_path = temp_workspace_dir / f"{mask_raster_path.stem}.tif"
-    for i, raster in enumerate(zonal_raster_list):
-        raster = Path(raster)
-        if i == 0 and not aligned_mask_raster_path.exists():
-            logger.debug(f"Aligning mask with zonal raster {raster}")
-            raster_info = pygeoprocessing.get_raster_info(str(raster))
-            pygeoprocessing.align_and_resize_raster_stack(
-                [str(raster), str(mask_raster_path)],
-                [
-                    str(temp_workspace_dir / f"{(raster).stem}.tif"),
-                    str(aligned_mask_raster_path),
-                ],
-                ["near", "near"],
-                raster_info["pixel_size"],
-                "intersection",
-                raster_align_index=0,
-            )
-        logger.debug(f"Zonal statistics {i+1} of {len(zonal_raster_list)} | {raster}")
-        zonal_stats_df = masked_zonal_stats(
-            raster,
-            aligned_mask_raster_path,
-            mask_raster_value,
-            zonal_vector_path,
-            temp_workspace_dir,
+    if zonal_join_columns_list is not None:
+        assert len(zonal_join_columns_list) == len(zonal_raster_list), (
+            f"Length of zonal_join_columns_list ({len(zonal_join_columns_list)}) must match "
+            f"length of zonal_raster_list ({len(zonal_raster_list)})."
         )
 
-        zonal_stats_df = zonal_stats_df[zonal_join_columns]
-        # Rename columns to labels if provided, else raster name
-        if zonal_raster_labels is not None:
-            zonal_stats_df = zonal_stats_df.rename(
-                columns={
-                    col: f"{zonal_raster_labels[i]}_masked__{col}"
-                    for col in zonal_join_columns
-                }
-            )
-        else:
-            zonal_stats_df = zonal_stats_df.rename(
-                columns={
-                    col: f"{(raster).stem}_masked__{col}" for col in zonal_join_columns
-                }
-            )
-        zonal_stats_list.append(zonal_stats_df)
+    # Ensure path arguments are Path objects
+    zonal_vector_path = Path(zonal_vector_path)
 
-    return zonal_stats_list, aligned_mask_raster_path
+    if zonal_join_columns_list is None:
+        zonal_join_columns_list = [
+            [
+                "count",
+                "nodata_count",
+                "sum",
+                "mean",
+            ]
+        ] * len(zonal_raster_list)
+
+    if zonal_raster_labels is None:
+        zonal_raster_labels = [None] * len(zonal_raster_list)
+
+    for zonal_raster_path, pickle_path, columns, label in zip(
+        zonal_raster_list,
+        pickle_path_list,
+        zonal_join_columns_list,
+        zonal_raster_labels,
+    ):
+        pickle_zonal_stats(
+            zonal_vector_path,
+            zonal_raster_path,
+            pickle_path,
+            zonal_join_columns=columns,
+            label=label,
+        )
+
+
+def join_batch_pickle_zonal_stats(
+    pickle_file_path_list: List[pathlike],
+    zonal_vector_path: pathlike,
+    output_vector_path: pathlike,
+):
+    """A function to join a list of pickled zonal statistics dataframes to a vector
+
+    Args:
+        pickle_file_list (list): List of paths to pickled zonal statistics dataframes
+        zonal_vector_path (pathlike): Path to vector to join to
+
+    Returns:
+        None
+    """
+    # Ensure path arguments are Path objects
+    zonal_vector_path = Path(zonal_vector_path)
+
+    zonal_stats_df_list = []
+    for pickle_file_path in pickle_file_path_list:
+        with open(pickle_file_path, "rb") as pickle_file:
+            zonal_stats_df_list.append(pickle.load(pickle_file))
+
+    # Join results to parcels
+    zonal_stats_df = pd.concat(zonal_stats_df_list, axis=1)
+
+    results_gdf = gpd.read_file(zonal_vector_path, engine="pyogrio", fid_as_index=True)
+    results_gdf = results_gdf.merge(
+        zonal_stats_df,
+        left_index=True,
+        right_index=True,
+    )
+    results_gdf.to_file(output_vector_path, driver="GPKG")
 
 
 def masked_zonal_stats(
-    base_raster_path,
-    mask_raster_path,
-    mask_value,
-    zonal_vector_path,
-    workspace_dir,
-):
+    base_raster_path: pathlike,
+    mask_raster_path: pathlike,
+    mask_value: int | float,
+    zonal_vector_path: pathlike,
+    workspace_path: pathlike,
+) -> pd.DataFrame:
     """Calculate zonal statistics for a raster masked by a mask raster.
 
     Args:
-        base_raster_path (_type_): _description_
-        mask_raster_path (_type_): _description_
-        mask_value (_type_): _description_
-        zonal_vector_path (_type_): _description_
-        workspace_dir (_type_): _description_
+        base_raster_path (pathlike): path to raster file to aggregate over.
+        mask_raster_path (pathlike): path to raster file to use as mask.
+        mask_value (int or float): value to use as mask.
+        zonal_vector_path (pathlike): path to vector file to aggregate over.
+        workspace_path (pathlike): path to desired workspace directory.
 
     Returns:
-        _type_: _description_
+        pandas.DataFrame: dataframe of zonal statistics.
     """
     # Ensure path arguments are Path objects
     base_raster_path = Path(base_raster_path)
     mask_raster_path = Path(mask_raster_path)
     zonal_vector_path = Path(zonal_vector_path)
-    workspace_dir = Path(workspace_dir)
+    workspace_path = Path(workspace_path)
 
     base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
     base_nodata = base_raster_info["nodata"][0]
@@ -1095,7 +1257,7 @@ def masked_zonal_stats(
         result[mask_array != mask_value] = base_nodata
         return result
 
-    target_mask_raster_path = workspace_dir / f"_masked_{base_raster_path.stem}.tif"
+    target_mask_raster_path = workspace_path / f"_masked_{base_raster_path.stem}.tif"
 
     logger.debug("Masking raster")
     pygeoprocessing.raster_calculator(
@@ -1119,13 +1281,103 @@ def masked_zonal_stats(
     return zonal_stats_df
 
 
-def rename_invest_results(invest_model, invest_args, suffix):
+def batch_masked_zonal_stats(
+    zonal_raster_list: list,
+    mask_raster_path: pathlike,
+    mask_raster_value: int | float,
+    zonal_vector_path: pathlike,
+    temp_workspace_path: pathlike,
+    zonal_join_columns: list = [
+        "count",
+        "nodata_count",
+        "sum",
+        "mean",
+    ],
+    zonal_raster_labels: List[str] = None,
+) -> Tuple[List[pd.DataFrame], Path]:
+    """A function to calculate masked zonal statistics for a list of rasters
+
+    Args:
+        zonal_raster_list (list): List of paths to rasters to calculate zonal statistics for
+        mask_raster_path (pathlike): Path to raster to use as mask
+        mask_raster_value (int or float): Value to use as mask
+        zonal_vector_path (pathlike): Path to vector to calculate zonal statistics for
+        temp_workspace_path (pathlike): Path to temporary workspace
+        zonal_join_columns (list): List of zonal statistics to calculate
+        zonal_raster_labels (list): List of labels for zonal rasters
+
+    Returns:
+        tuple: Tuple of list of zonal statistics dataframes and path to aligned mask raster
+    """
+
+    if zonal_raster_labels is not None:
+        assert len(zonal_raster_labels) == len(zonal_raster_list), (
+            f"Length of zonal_raster_labels ({len(zonal_raster_labels)}) must match "
+            f"length of zonal_raster_list ({len(zonal_raster_list)})."
+        )
+
+    # Ensure path arguments are Path objects
+    mask_raster_path = Path(mask_raster_path)
+    zonal_vector_path = Path(zonal_vector_path)
+    temp_workspace_path = Path(temp_workspace_path)
+
+    zonal_stats_list = []
+    aligned_mask_raster_path = temp_workspace_path / f"{mask_raster_path.stem}.tif"
+    for i, raster in enumerate(zonal_raster_list):
+        raster = Path(raster)
+        if i == 0 and not aligned_mask_raster_path.exists():
+            logger.debug(f"Aligning mask with zonal raster {raster}")
+            raster_info = pygeoprocessing.get_raster_info(str(raster))
+            pygeoprocessing.align_and_resize_raster_stack(
+                [str(raster), str(mask_raster_path)],
+                [
+                    str(temp_workspace_path / f"{(raster).stem}.tif"),
+                    str(aligned_mask_raster_path),
+                ],
+                ["near", "near"],
+                raster_info["pixel_size"],
+                "intersection",
+                raster_align_index=0,
+            )
+        logger.debug(f"Zonal statistics {i+1} of {len(zonal_raster_list)} | {raster}")
+        zonal_stats_df = masked_zonal_stats(
+            raster,
+            aligned_mask_raster_path,
+            mask_raster_value,
+            zonal_vector_path,
+            temp_workspace_path,
+        )
+
+        zonal_stats_df = zonal_stats_df[zonal_join_columns]
+        # Rename columns to labels if provided, else raster name
+        if zonal_raster_labels is not None:
+            zonal_stats_df = zonal_stats_df.rename(
+                columns={
+                    col: f"{zonal_raster_labels[i]}_masked__{col}"
+                    for col in zonal_join_columns
+                }
+            )
+        else:
+            zonal_stats_df = zonal_stats_df.rename(
+                columns={
+                    col: f"{(raster).stem}_masked__{col}" for col in zonal_join_columns
+                }
+            )
+        zonal_stats_list.append(zonal_stats_df)
+
+    return zonal_stats_list, aligned_mask_raster_path
+
+
+def rename_invest_results(invest_model: str, invest_args: dict, suffix: str) -> None:
     """Rename InVEST results to include the suffix.
 
     Args:
         invest_model (str): InVEST model name.
-        invest_info (dict): _description_
+        invest_args (dict): InVEST model arguments.
         suffix (str): String to append to the end of the file name.
+
+    Returns:
+        None
     """
     results_suffix = natcap.invest.utils.make_suffix_string(
         invest_args, "results_suffix"
@@ -1170,8 +1422,11 @@ def rename_invest_results(invest_model, invest_args, suffix):
 
 
 def clip_raster_by_vector(
-    mask_path, raster_path, output_raster_path, field_filter: tuple = None
-):
+    mask_path: pathlike,
+    raster_path: pathlike,
+    output_raster_path: pathlike,
+    field_filter: tuple = None,
+) -> None:
     """Clip a raster by a vector mask.
 
     Args:
@@ -1180,6 +1435,9 @@ def clip_raster_by_vector(
         output_raster_path (str): Path to the output raster.
         field_filter (tuple(str, list)): tuple of field string and value list
             for filtering the vector
+
+    Returns:
+        None
     """
     mask_gdf = gpd.read_file(mask_path)
 
@@ -1187,16 +1445,22 @@ def clip_raster_by_vector(
 
 
 def clip_raster_by_gdf(
-    mask_gdf, raster_path, output_raster_path, field_filter: tuple = None
-):
+    mask_gdf: gpd.GeoDataFrame,
+    raster_path: pathlike,
+    output_raster_path: pathlike,
+    field_filter: tuple = None,
+) -> None:
     """Clip a raster by a vector gdf mask.
 
     Args:
         mask_gdf (GeoDataFrame): Geopandas GeoDataFrame.
-        raster_path (str): Path to the raster to be clipped.
-        output_raster_path (str): Path to the output raster.
+        raster_path (pathlike): Path to the raster to be clipped.
+        output_raster_path (pathlike): Path to the output raster.
         field_filter (tuple(str, list)): tuple of field string and value list
             for filtering the vector
+
+    Returns:
+        None
     """
 
     if field_filter is not None:
@@ -1233,7 +1497,7 @@ def burn_polygon_add(
     constraining_raster_value_tuple: typing.Tuple[
         pathlike, typing.List[int | float]
     ] = None,
-):
+) -> None:
     """Burns a polygon into a raster by adding a specified value.
 
     Args:
@@ -1380,18 +1644,16 @@ def burn_polygon_add(
 
 
 def overlay_on_top_of_lulc(
-    vector_path,
-    base_lulc_path,
-    intermediate_workspace_path,
-    target_raster_path,
+    vector_path: pathlike,
+    base_lulc_path: pathlike,
+    intermediate_workspace_path: pathlike,
+    target_raster_path: pathlike,
     burn_value: int | float = 1,
     nodata_val: int | float = None,
     burn_add: bool = True,
     burn_attribute: str = None,
-    constraining_raster_value_tuple: typing.Tuple[
-        pathlike, typing.List[int | float]
-    ] = None,
-):
+    constraining_raster_value_tuple: Tuple[pathlike, List[int | float]] = None,
+) -> None:
     """Burns a polygon into a raster by adding a specified value, ensuring that the burn values are using digits unused in the base raster.
 
     Args:
@@ -1405,6 +1667,9 @@ def overlay_on_top_of_lulc(
         burn_attribute (str): Attribute to use for burning. If None, will burn all polygons with the same value.
         constraining_raster_value_tuple (tuple, optional): Tuple of (pathlike, List[int/float])
             to use for constraining the output raster. If None, will not constrain.
+
+    Returns:
+        None
     """
 
     # Extract maximum value of the raster to determine how many digits are needed
@@ -1457,7 +1722,7 @@ def calculate_load_per_pixel(
     lucode_to_parameters: dict,
     target_load_raster: pathlike,
     nodata_val: float,
-):
+) -> None:
     """Calculate load raster by mapping landcover and multiplying by area.
 
     Args:
@@ -1523,6 +1788,8 @@ def categorize_raster(
         category_colors (list): list of colors for each bin
         category_value_labels (list): (optional) list of values for each bin
 
+    Returns:
+        None
     """
 
     if category_value_labels is None:
@@ -1582,7 +1849,7 @@ def assign_raster_labels_and_colors(
     category_labels: List[str],
     category_hex_colors: List[str],
     raster_band_label: str,
-):
+) -> None:
     """Assign labels and colors to raster categories.
 
     Args:
@@ -1590,8 +1857,10 @@ def assign_raster_labels_and_colors(
         category_values (list): list of category values (must be in ascending order!)
         category_labels (list): list of labels for each category value
         category_colors (list): list of colors for each category value
-        raster_band_label (int): band number of input raster to use
+        raster_band_label (int): Band label
 
+    Returns:
+        None
     """
     # TODO add validation error if category_values, category_labels, and category_hex_colors are not the same length
     # Read raster band
@@ -1599,16 +1868,16 @@ def assign_raster_labels_and_colors(
     band = raster.GetRasterBand(1)
 
     # # Raster Attribute Table
-    # rat = gdal.RasterAttributeTable()
+    rat = gdal.RasterAttributeTable()
 
-    # rat.CreateColumn("Value", gdal.GFT_Integer, gdal.GFU_MinMax)
-    # rat.CreateColumn("Label", gdal.GFT_String, gdal.GFU_Name)
+    rat.CreateColumn("Value", gdal.GFT_Integer, gdal.GFU_MinMax)
+    rat.CreateColumn("Label", gdal.GFT_String, gdal.GFU_Name)
 
-    # for i, label in enumerate(category_labels):
-    #     rat.SetValueAsInt(i, 0, int(i))
-    #     rat.SetValueAsString(i, 1, str(label))
+    for i, (value, label) in enumerate(zip(category_values, category_labels)):
+        rat.SetValueAsInt(i, 0, int(value))
+        rat.SetValueAsString(i, 1, str(label))
 
-    # band.SetDefaultRAT(rat)
+    band.SetDefaultRAT(rat)
 
     # GDAL Color Table
     color_table = gdal.ColorTable()
@@ -1622,13 +1891,19 @@ def assign_raster_labels_and_colors(
     band.SetRasterColorTable(color_table)
     band.SetRasterColorInterpretation(gdal.GCI_PaletteIndex)
 
-    # set category names
+    # # set category names
+    dtype = rio.dtypes.dtype_fwd[band.DataType]
+    if dtype != "uint8":
+        logger.warning(
+            "Raster data type is not uint8. Assigning category names may increase raster size."
+        )
+    raster_values = rio.dtypes.dtype_ranges[rio.dtypes.dtype_fwd[band.DataType]]
     value_dict = {
         value: label for value, label in zip(category_values, category_labels)
     }
     full_labels = [
         value_dict[value] if value in value_dict else str(value)
-        for value in range(255 + 1)
+        for value in range(raster_values[0], raster_values[1] + 1)
     ]
     band.SetRasterCategoryNames(full_labels)
 
@@ -1667,14 +1942,14 @@ def make_scenario_suffix(file_suffix: str, scenario_suffix: str = None) -> str:
 
 
 def conditional_vector_project(
-    vector_path: pathlike, projection_wkt: str, workspace_dir: pathlike
-):
+    vector_path: pathlike, projection_wkt: str, workspace_path: pathlike
+) -> Path:
     """Tests if the selected vector is in the selected projection and if not, project it and create new file.
 
     Args:
         vector_path (pathlike): Path to vector to conditionally project
         projection_wkt (str): Well-Known_Text of desired geospatial projection
-        workspace_dir (pathlike): Path to folder in which to deposit resulting file, if projected.
+        workspace_path (pathlike): Path to folder in which to deposit resulting file, if projected.
 
     Returns:
         target_path (Path): Path to resulting vector (either the original or the newly projected)
@@ -1682,13 +1957,15 @@ def conditional_vector_project(
 
     # Ensure all pathlike variables are paths
     parcel_vector = Path(parcel_vector)
-    workspace_dir = Path(workspace_dir)
+    workspace_path = Path(workspace_path)
 
     vector_info = pygeoprocessing.get_vector_info(str(vector_path))
     if vector_info["projection_wkt"] != projection_wkt:
-        target_path = workspace_dir / vector_path.name
+        target_path = workspace_path / vector_path.name
         if target_path.is_file():
-            target_path = workspace_dir / f"{vector_path.stem}_proj{vector_path.suffix}"
+            target_path = (
+                workspace_path / f"{vector_path.stem}_proj{vector_path.suffix}"
+            )
         logger.debug(f"Reprojecting {vector_path.name}")
         pygeoprocessing.reproject_vector(
             str(vector_path), projection_wkt, str(target_path)

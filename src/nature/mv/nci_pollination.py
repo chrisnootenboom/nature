@@ -409,7 +409,6 @@ _DELTA_ANNUAL_YIELD_VALUE_FILE_PATTERN = "d_annual_yield_value_%s.tif"
 _DELTA_ANNUAL_YIELD_BY_VISITATION_BY_OWNERSHIP_FILE_PATTERN = (
     "d_annual_yield_d_pollinator_visitation_%s%s.tif"
 )
-_OWNERSHIP_FILE_PATTERN = "ownership_%s%s.gpkg"
 # change in crop yield raster replace (season, file_suffix)
 _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_BY_OWNERSHIP_FILE_PATTERN = (
     "d_annual_yield_d_pollinator_landscape_score_%s%s.tif"
@@ -425,6 +424,7 @@ _DELTA_ANNUAL_YIELD_VALUE_PRIVATE_FILE_PATTERN = "d_annual_yield_value_private_%
 _DELTA_ANNUAL_YIELD_VALUE_EXTERNALITY_FILE_PATTERN = (
     "d_annual_yield_value_externality_%s.tif"
 )
+_OWNERSHIP_RESULTS_FILE_PATTERN = "ownership_results%s.gpkg"
 
 # ownership vector stuff
 _OWNERSHIP_FIELD = "landowner"
@@ -437,6 +437,9 @@ _SPECIES_SEASON_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/species_season_intermediates"
 _SPECIES_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/species_intermediates"
 _SEASON_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/season_intermediates"
 _OWNERSHIP_DIR = f"{_INTERMEDIATE_OUTPUT_DIR}/ownership_intermediates"
+
+
+# TODO clip outputs by landcover_raster_path nodata mask
 
 
 def execute(args):
@@ -583,7 +586,6 @@ def execute(args):
         BASELINE_ARGS,
         baseline_scenario_label=BASELINE_SCENARIO_LABEL,
     )
-    LOGGER.debug(scenario_labels_list)
 
     run_scenario_analysis = len(scenario_labels_list) > 1
 
@@ -673,11 +675,13 @@ def execute(args):
             "crop_value_raster_path",
             "annual_yield_raster_path",
             "annual_yield_value_raster_path",
+            "annual_yield_pickle_paths",
             # Marginal Value variables
             "delta_annual_yield_by_visitation_raster_path",
             "delta_annual_yield_by_landscape_score_raster_path",
             "delta_annual_yield_raster_path",
             "delta_annual_yield_value_raster_path",
+            "delta_annual_yield_pickle_paths",
             # Ownership variables
             "delta_annual_yield_by_visitation_by_ownership_raster_path",
             "delta_annual_yield_by_landscape_score_by_ownership_raster_path",
@@ -727,9 +731,13 @@ def execute(args):
         delta_annual_yield_value_private_tasks = {
             name: {} for name in scenario_labels_list
         }
-        delta_annual_yield_externality_tasks = {
+        delta_annual_yield_value_externality_tasks = {
             name: {} for name in scenario_labels_list
         }
+
+        # Pickle tasks
+        annual_yield_pickle_tasks = {name: {} for name in scenario_labels_list}
+        delta_annual_yield_pickle_tasks = {name: {} for name in scenario_labels_list}
 
     # Iterate through scenarios (even if there is only one)
     for scenario_name in scenario_labels_list:
@@ -1543,7 +1551,7 @@ def execute(args):
             ] = crop_value_raster_path
 
             # Aggregate raster data if necessary
-            # TODO aggregate crop rasters
+            # [x] TODO aggregate crop rasters
             if args["aggregate_size"] not in [None, ""]:
                 LOGGER.info(
                     f"{scenario_name} | Aggregating crop pollinator dependence, value, and half saturation rasters"
@@ -1773,11 +1781,49 @@ def execute(args):
                     scenario_name
                 ] = annual_yield_value_raster_path
 
-                LOGGER.info(
-                    scenario_variables["annual_yield_value_raster_path"][
-                        BASELINE_SCENARIO_LABEL
+                if ownership_vector_path is not None:
+                    # Performing Zonal Statistics on baseline yield and yield value
+                    LOGGER.info(
+                        f"{scenario_name} | Calculating zonal statistics on yield and yield value"
+                    )
+
+                    annual_yield_pickle_path = intermediate_output_dir / (
+                        _ANNUAL_YIELD_FILE_PATTERN % file_suffix
+                    ).replace(".tif", ".pickle")
+                    annual_yield_value_pickle_path = intermediate_output_dir / (
+                        _ANNUAL_YIELD_VALUE_FILE_PATTERN % file_suffix
+                    ).replace(".tif", ".pickle")
+
+                    annual_yield_pickle_tasks[scenario_name] = task_graph.add_task(
+                        task_name=f"annual_yield_pickle_zonal_stats_{scenario_name}",
+                        func=nature.batch_pickle_zonal_stats,
+                        args=(
+                            [
+                                scenario_variables["annual_yield_raster_path"][
+                                    scenario_name
+                                ],
+                                scenario_variables["annual_yield_value_raster_path"][
+                                    scenario_name
+                                ],
+                            ],
+                            ownership_vector_path,
+                            [annual_yield_pickle_path, annual_yield_value_pickle_path],
+                            [["sum"], ["sum"]],
+                        ),
+                        target_path_list=[
+                            str(annual_yield_pickle_path),
+                            str(annual_yield_value_pickle_path),
+                        ],
+                        dependent_task_list=[
+                            annual_yield_tasks[scenario_name],
+                            annual_yield_value_tasks[scenario_name],
+                        ],
+                    )
+
+                    scenario_variables["annual_yield_pickle_paths"][scenario_name] = [
+                        annual_yield_pickle_path,
+                        annual_yield_value_pickle_path,
                     ]
-                )
             else:
                 # Calculate delta yield
                 LOGGER.info(
@@ -1998,18 +2044,29 @@ def execute(args):
                     scenario_name
                 ] = delta_annual_yield_value_raster_path
 
-                # TODO implement masking by owner to partition public/private benefit
+                # [x] TODO implement masking by owner to partition public/private benefit
 
                 # TODO add discount rate and years to calculate net present value
 
                 if ownership_vector_path is not None:
                     # Calculating private vs public change in yield.
                     # [x] TODO Change filepaths to reflect ownership
-                    for owner_raw in scenario_variables["owner_list"]:
+                    for i, owner_raw in enumerate(scenario_variables["owner_list"]):
+                        if i in list(
+                            range(
+                                0,
+                                len(scenario_variables["owner_list"]),
+                                round(len(scenario_variables["owner_list"]) / 20),
+                            )
+                        ):
+                            percent_complete = round(
+                                100.0 * (i / len(scenario_variables["owner_list"]))
+                            )
+                            LOGGER.debug(
+                                f"{scenario_name} | Calculating Private Crop Yield Marginal Value raster | {percent_complete}%"
+                            )
                         owner = nature.strip_string(owner_raw)
-                        LOGGER.debug(
-                            f"{scenario_name} | {owner} | Calculating Private Crop Yield Marginal Value raster | By landscape score (convolve)"
-                        )
+
                         delta_annual_yield_by_landscape_score_by_ownership_raster_path = ownership_dir / (
                             _DELTA_ANNUAL_YIELD_BY_LANDSCAPE_SCORE_BY_OWNERSHIP_FILE_PATTERN
                             % (owner, file_suffix)
@@ -2051,10 +2108,6 @@ def execute(args):
                             owner
                         ] = delta_annual_yield_by_landscape_score_by_ownership_raster_path
 
-                        LOGGER.debug(
-                            f"{scenario_name} | {owner} | Calculating Private Crop Yield Marginal Value raster | Multiply by landscape score"
-                        )
-
                         delta_annual_yield_by_ownership_raster_path = (
                             ownership_output_dir
                             / (
@@ -2063,7 +2116,7 @@ def execute(args):
                             )
                         )
 
-                        # TODO add another mask
+                        # [x] TODO add another mask
 
                         delta_annual_yield_by_ownership_tasks[scenario_name][
                             owner
@@ -2106,9 +2159,6 @@ def execute(args):
                         ] = delta_annual_yield_by_ownership_raster_path
 
                         # calculate the marginal change in annual crop yield value
-                        LOGGER.debug(
-                            f"{scenario_name} | {owner} | Calculating Private Annual Crop Yield Value Marginal Value raster"
-                        )
                         delta_annual_yield_value_by_ownership_raster_path = (
                             ownership_output_dir
                             / (
@@ -2163,6 +2213,7 @@ def execute(args):
                             owner
                         ] = delta_annual_yield_value_by_ownership_raster_path
 
+                    # Calculate sum of private changes in yield value
                     LOGGER.info(
                         f"{scenario_name} | Calculating sum of 'private' changes in yield value"
                     )
@@ -2209,6 +2260,7 @@ def execute(args):
                         scenario_name
                     ] = delta_annual_yield_value_private_raster_path
 
+                    # Calculating yield value externality
                     LOGGER.info(
                         f"{scenario_name} | Calculating yield value externality"
                     )
@@ -2216,7 +2268,7 @@ def execute(args):
                         _DELTA_ANNUAL_YIELD_VALUE_EXTERNALITY_FILE_PATTERN % file_suffix
                     )
 
-                    delta_annual_yield_externality_tasks[
+                    delta_annual_yield_value_externality_tasks[
                         scenario_name
                     ] = task_graph.add_task(
                         task_name=f"calculate_delta_annual_yield_value_externality_{scenario_name}",
@@ -2257,6 +2309,119 @@ def execute(args):
                     scenario_variables[
                         "delta_annual_yield_value_externality_raster_path"
                     ][scenario_name] = delta_annual_yield_value_externality_raster_path
+
+                    # Performing Zonal Statistics on delta yield and yield value
+                    LOGGER.info(
+                        f"{scenario_name} | Calculating zonal statistics on delta yield, yield value, and their private and externality components"
+                    )
+
+                    delta_annual_yield_pickle_path = intermediate_output_dir / (
+                        _DELTA_ANNUAL_YIELD_FILE_PATTERN % file_suffix
+                    ).replace(".tif", ".pickle")
+                    delta_annual_yield_value_pickle_path = intermediate_output_dir / (
+                        _DELTA_ANNUAL_YIELD_VALUE_FILE_PATTERN % file_suffix
+                    ).replace(".tif", ".pickle")
+                    delta_annual_yield_value_private_pickle_path = (
+                        intermediate_output_dir
+                        / (
+                            _DELTA_ANNUAL_YIELD_VALUE_PRIVATE_FILE_PATTERN % file_suffix
+                        ).replace(".tif", ".pickle")
+                    )
+                    delta_annual_yield_value_externality_pickle_tasks = (
+                        intermediate_output_dir
+                        / (
+                            _DELTA_ANNUAL_YIELD_VALUE_EXTERNALITY_FILE_PATTERN
+                            % file_suffix
+                        ).replace(".tif", ".pickle")
+                    )
+
+                    delta_annual_yield_pickle_tasks[
+                        scenario_name
+                    ] = task_graph.add_task(
+                        task_name=f"delta_annual_yield_pickle_zonal_stats_{scenario_name}",
+                        func=nature.batch_pickle_zonal_stats,
+                        args=(
+                            [
+                                scenario_variables["delta_annual_yield_raster_path"][
+                                    scenario_name
+                                ],
+                                scenario_variables[
+                                    "delta_annual_yield_value_raster_path"
+                                ][scenario_name],
+                                scenario_variables[
+                                    "delta_annual_yield_value_private_raster_path"
+                                ][scenario_name],
+                                scenario_variables[
+                                    "delta_annual_yield_value_externality_raster_path"
+                                ][scenario_name],
+                            ],
+                            ownership_vector_path,
+                            [
+                                delta_annual_yield_pickle_path,
+                                delta_annual_yield_value_pickle_path,
+                                delta_annual_yield_value_private_pickle_path,
+                                delta_annual_yield_value_externality_pickle_tasks,
+                            ],
+                            [
+                                ["sum"],
+                                ["sum"],
+                                ["sum"],
+                                ["sum"],
+                            ],
+                        ),
+                        target_path_list=[
+                            str(delta_annual_yield_pickle_path),
+                            str(delta_annual_yield_value_pickle_path),
+                            str(delta_annual_yield_value_private_pickle_path),
+                            str(delta_annual_yield_value_externality_pickle_tasks),
+                        ],
+                        dependent_task_list=[
+                            delta_annual_yield_tasks[scenario_name],
+                            delta_annual_yield_value_tasks[scenario_name],
+                            delta_annual_yield_value_private_tasks[scenario_name],
+                            delta_annual_yield_value_externality_tasks[scenario_name],
+                        ],
+                    )
+
+                    scenario_variables["delta_annual_yield_pickle_paths"][
+                        scenario_name
+                    ] = [
+                        delta_annual_yield_pickle_path,
+                        delta_annual_yield_value_pickle_path,
+                        delta_annual_yield_value_private_pickle_path,
+                        delta_annual_yield_value_externality_pickle_tasks,
+                    ]
+
+    if ownership_vector_path is not None:
+        LOGGER.info(f"Joining zonal statistics results to ownership data")
+
+        ownership_results_path = output_dir / (
+            _OWNERSHIP_RESULTS_FILE_PATTERN % basic_file_suffix
+        )
+
+        join_zonal_stats_task = task_graph.add_task(
+            task_name=f"join_zonal_stats",
+            func=nature.join_batch_pickle_zonal_stats,
+            args=(
+                scenario_variables["annual_yield_pickle_paths"][BASELINE_SCENARIO_LABEL]
+                + [
+                    pickle_path
+                    for scenario_name in scenario_labels_list
+                    for pickle_path in scenario_variables[
+                        "delta_annual_yield_pickle_paths"
+                    ][scenario_name]
+                ],
+                ownership_vector_path,
+                ownership_results_path,
+            ),
+            dependent_task_list=[annual_yield_pickle_tasks[BASELINE_SCENARIO_LABEL]]
+            + [
+                delta_annual_yield_pickle_tasks[scenario_name]
+                for scenario_name in scenario_labels_list
+                if scenario_name != BASELINE_SCENARIO_LABEL
+            ],
+            target_path_list=[ownership_results_path],
+        )
 
     task_graph.close()
     task_graph.join()
@@ -2792,7 +2957,7 @@ def _parse_scenario_variables(
     )
 
     if "ownership_vector_path" in args and args["ownership_vector_path"] != "":
-        ownership_vector_path = str(args["ownership_vector_path"])
+        ownership_vector_path = Path(args["ownership_vector_path"])
     else:
         ownership_vector_path = None
 
@@ -2867,8 +3032,9 @@ def _parse_scenario_variables(
     ownership_vector = None
     if ownership_vector_path is not None:
         LOGGER.info("Checking that ownership parcel polygon has expected headers")
-        ownership_vector = gdal.OpenEx(ownership_vector_path)
+        ownership_vector = gdal.OpenEx(str(ownership_vector_path))
         ownership_layer = ownership_vector.GetLayer()
+        ownership_layer.GetGeomType() ###
         if ownership_layer.GetGeomType() not in [ogr.wkbPolygon, ogr.wkbMultiPolygon]:
             ownership_layer = None
             ownership_vector = None
@@ -2885,7 +3051,7 @@ def _parse_scenario_variables(
             if not matches:
                 raise ValueError(
                     f"Missing expected header(s) '{header}' from "
-                    f"{ownership_vector_path}.\n"
+                    f"{str(ownership_vector_path)}.\n"
                     f"Got these headers instead: {ownership_headers}"
                 )
         owner_set = set()

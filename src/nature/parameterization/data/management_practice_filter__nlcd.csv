@@ -1,0 +1,16 @@
+﻿lucode,lulc_desc,fertilizer,pesticide,irrigation,planting_diversity,mowing,public_access,green_space,building_type
+11,Open Water,0,0,0,0,0,1,1,0
+21,"Developed, Open Space",1,1,1,1,1,1,1,0
+22,"Developed, Low Intensity",1,1,1,1,1,0,1,1
+23,"Developed, Medium Intensity",1,1,1,1,1,0,1,1
+24,"Developed, High Intensity",1,1,1,1,1,0,1,1
+31,Barren Land,1,1,1,1,1,1,1,0
+41,Deciduous Forest,0,1,0,0,1,1,1,0
+42,Evergreen Forest,0,1,0,0,1,1,1,0
+43,Mixed Forest,0,1,0,0,1,1,1,0
+52,Shrub/Scrub,1,1,1,1,1,1,1,0
+71,Herbaceous,1,1,1,1,1,1,1,0
+81,Hay/Pasture,1,1,1,1,1,1,1,0
+82,Cultivated Crops,1,1,1,0,0,1,1,0
+90,Woody Wetlands,1,1,0,0,1,1,1,0
+95,Emergent Herbaceous Wetlands,1,1,0,0,1,1,1,0
