@@ -3,6 +3,10 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# Testing data and outputs
+/tests/nature/data/*
+/tests/nature/workspace/*
+
 # Mac stuff
 .DS_Store
 
@@ -10,6 +14,7 @@
 *.ipynb_checkpoints/
 
 # User-specific files
+.env
 *.rsuser
 *.suo
 *.user

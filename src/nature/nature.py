@@ -5,6 +5,7 @@ from typing import List, Set, Dict, Tuple, Optional
 import tempfile
 import shutil
 import pickle
+import warnings
 
 import requests
 import xmltodict
@@ -23,6 +24,7 @@ from rasterio.merge import merge
 from rasterio.mask import mask
 from osgeo import gdal, osr
 import geopandas as gpd
+from osgeo import ogr
 
 import pygeoprocessing
 from pygeoprocessing.geoprocessing_core import DEFAULT_GTIFF_CREATION_TUPLE_OPTIONS
@@ -66,20 +68,20 @@ def message(*messages: str) -> str:
 
 
 def geospatial_export(
-    gdf: gpd.GeoDataFrame, file_name: str, workspace_dir: Path
+    gdf: gpd.GeoDataFrame, file_name: str, workspace_path: Path
 ) -> Tuple[Path, Path]:
     """Export a GeoDataFrame to shapefile and geopackage.
 
     Args:
         gdf (gpd.GeoDataFrame): The GeoDataFrame to export.
         file_name (str): The name of the file to export.
-        workspace_dir (pathlib.Path): The directory to export to.
+        workspace_path (pathlib.Path): The directory to export to.
 
     Returns:
         tuple: The paths to the shapefile and geopackage.
     """
-    output_shp = workspace_dir / f"{file_name}.shp"
-    output_gpkg = workspace_dir / f"{file_name}.gpkg"
+    output_shp = workspace_path / f"{file_name}.shp"
+    output_gpkg = workspace_path / f"{file_name}.gpkg"
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1067,307 +1069,6 @@ def copy_raster_to_new_datatype(
         dst.write(src_array.astype(rasterio_dtype), 1)
 
 
-def pickle_zonal_stats(
-    base_vector_path: pathlike,
-    base_raster_path: pathlike,
-    target_pickle_path: pathlike,
-    zonal_join_columns: list = [
-        "count",
-        "nodata_count",
-        "sum",
-        "mean",
-    ],
-    label: str = None,
-) -> None:
-    """Calculate Zonal Stats for a vector/raster pair and pickle result.
-
-    Args:
-        base_vector_path (pathlike): path to vector file
-        base_raster_path (pathlike): path to raster file to aggregate over.
-        target_pickle_path (pathlike): path to desired target pickle file that will
-            be a pickle of the pygeoprocessing.zonal_stats function.
-
-    Returns:
-        None.
-
-    """
-    # Ensure path arguments are Path objects
-    base_vector_path = Path(base_vector_path)
-    base_raster_path = Path(base_raster_path)
-    target_pickle_path = Path(target_pickle_path)
-
-    logger.info(
-        f"Taking zonal statistics of {str(base_vector_path)} "
-        f"over {str(base_raster_path)}"
-    )
-    zonal_stats_dict = pygeoprocessing.zonal_statistics(
-        (str(base_raster_path), 1), str(base_vector_path), polygons_might_overlap=True
-    )
-    zonal_stats_df = pd.DataFrame(zonal_stats_dict).transpose()
-    zonal_stats_df.index += -1  # Make sure indices match
-
-    zonal_stats_df["mean"] = zonal_stats_df["sum"] / zonal_stats_df["count"]
-
-    zonal_stats_df = zonal_stats_df[zonal_join_columns]
-    # Rename columns to labels if provided, else raster name
-    if label is not None:
-        zonal_stats_df = zonal_stats_df.rename(
-            columns={col: f"{label}__{col}" for col in zonal_join_columns}
-        )
-    else:
-        zonal_stats_df = zonal_stats_df.rename(
-            columns={
-                col: f"{(base_raster_path).stem}__{col}" for col in zonal_join_columns
-            }
-        )
-
-    with open(target_pickle_path, "wb") as pickle_file:
-        pickle.dump(zonal_stats_df, pickle_file)
-
-
-def batch_pickle_zonal_stats(
-    zonal_raster_list: list,
-    zonal_vector_path: pathlike,
-    pickle_path_list: list,
-    zonal_join_columns_list: List[list] = None,
-    zonal_raster_labels: List[str] = None,
-) -> Tuple[List[pd.DataFrame], Path]:
-    """A function to calculate and pickle zonal statistics for a list of rasters
-
-    Args:
-        zonal_raster_list (list): List of paths to rasters to calculate zonal statistics for
-        zonal_vector_path (pathlike): Path to vector to calculate zonal statistics for
-        zonal_join_columns (list): List of zonal statistics to calculate
-        zonal_raster_labels (list): List of labels for zonal rasters
-
-    Returns:
-        tuple: Tuple of list of zonal statistics dataframes and path to aligned mask raster
-    """
-
-    assert len(pickle_path_list) == len(zonal_raster_list), (
-        f"Length of pickle_path_list ({len(pickle_path_list)}) must match "
-        f"length of zonal_raster_list ({len(zonal_raster_list)})."
-    )
-    if zonal_raster_labels is not None:
-        assert len(zonal_raster_labels) == len(zonal_raster_list), (
-            f"Length of zonal_raster_labels ({len(zonal_raster_labels)}) must match "
-            f"length of zonal_raster_list ({len(zonal_raster_list)})."
-        )
-    if zonal_join_columns_list is not None:
-        assert len(zonal_join_columns_list) == len(zonal_raster_list), (
-            f"Length of zonal_join_columns_list ({len(zonal_join_columns_list)}) must match "
-            f"length of zonal_raster_list ({len(zonal_raster_list)})."
-        )
-
-    # Ensure path arguments are Path objects
-    zonal_vector_path = Path(zonal_vector_path)
-
-    if zonal_join_columns_list is None:
-        zonal_join_columns_list = [
-            [
-                "count",
-                "nodata_count",
-                "sum",
-                "mean",
-            ]
-        ] * len(zonal_raster_list)
-
-    if zonal_raster_labels is None:
-        zonal_raster_labels = [None] * len(zonal_raster_list)
-
-    for zonal_raster_path, pickle_path, columns, label in zip(
-        zonal_raster_list,
-        pickle_path_list,
-        zonal_join_columns_list,
-        zonal_raster_labels,
-    ):
-        pickle_zonal_stats(
-            zonal_vector_path,
-            zonal_raster_path,
-            pickle_path,
-            zonal_join_columns=columns,
-            label=label,
-        )
-
-
-def join_batch_pickle_zonal_stats(
-    pickle_file_path_list: List[pathlike],
-    zonal_vector_path: pathlike,
-    output_vector_path: pathlike,
-):
-    """A function to join a list of pickled zonal statistics dataframes to a vector
-
-    Args:
-        pickle_file_list (list): List of paths to pickled zonal statistics dataframes
-        zonal_vector_path (pathlike): Path to vector to join to
-
-    Returns:
-        None
-    """
-    # Ensure path arguments are Path objects
-    zonal_vector_path = Path(zonal_vector_path)
-
-    zonal_stats_df_list = []
-    for pickle_file_path in pickle_file_path_list:
-        with open(pickle_file_path, "rb") as pickle_file:
-            zonal_stats_df_list.append(pickle.load(pickle_file))
-
-    # Join results to parcels
-    zonal_stats_df = pd.concat(zonal_stats_df_list, axis=1)
-
-    results_gdf = gpd.read_file(zonal_vector_path, engine="pyogrio", fid_as_index=True)
-    results_gdf = results_gdf.merge(
-        zonal_stats_df,
-        left_index=True,
-        right_index=True,
-    )
-    results_gdf.to_file(output_vector_path, driver="GPKG")
-
-
-def masked_zonal_stats(
-    base_raster_path: pathlike,
-    mask_raster_path: pathlike,
-    mask_value: int | float,
-    zonal_vector_path: pathlike,
-    workspace_path: pathlike,
-) -> pd.DataFrame:
-    """Calculate zonal statistics for a raster masked by a mask raster.
-
-    Args:
-        base_raster_path (pathlike): path to raster file to aggregate over.
-        mask_raster_path (pathlike): path to raster file to use as mask.
-        mask_value (int or float): value to use as mask.
-        zonal_vector_path (pathlike): path to vector file to aggregate over.
-        workspace_path (pathlike): path to desired workspace directory.
-
-    Returns:
-        pandas.DataFrame: dataframe of zonal statistics.
-    """
-    # Ensure path arguments are Path objects
-    base_raster_path = Path(base_raster_path)
-    mask_raster_path = Path(mask_raster_path)
-    zonal_vector_path = Path(zonal_vector_path)
-    workspace_path = Path(workspace_path)
-
-    base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
-    base_nodata = base_raster_info["nodata"][0]
-
-    def mask_op(base_array, mask_array):
-        result = np.copy(base_array)
-        result[mask_array != mask_value] = base_nodata
-        return result
-
-    target_mask_raster_path = workspace_path / f"_masked_{base_raster_path.stem}.tif"
-
-    logger.debug("Masking raster")
-    pygeoprocessing.raster_calculator(
-        [(str(base_raster_path), 1), (str(mask_raster_path), 1)],
-        mask_op,
-        str(target_mask_raster_path),
-        base_raster_info["datatype"],
-        base_nodata,
-    )
-
-    logger.debug("Calculating zonal statistics")
-    zonal_stats_dict = pygeoprocessing.zonal_statistics(
-        (str(target_mask_raster_path), 1), str(zonal_vector_path)
-    )
-    zonal_stats_df = pd.DataFrame(zonal_stats_dict).transpose()
-    zonal_stats_df.index += -1  # Make sure indices match
-
-    zonal_stats_df["mean"] = zonal_stats_df["sum"] / zonal_stats_df["count"]
-    # os.remove(target_mask_raster_path)
-
-    return zonal_stats_df
-
-
-def batch_masked_zonal_stats(
-    zonal_raster_list: list,
-    mask_raster_path: pathlike,
-    mask_raster_value: int | float,
-    zonal_vector_path: pathlike,
-    temp_workspace_path: pathlike,
-    zonal_join_columns: list = [
-        "count",
-        "nodata_count",
-        "sum",
-        "mean",
-    ],
-    zonal_raster_labels: List[str] = None,
-) -> Tuple[List[pd.DataFrame], Path]:
-    """A function to calculate masked zonal statistics for a list of rasters
-
-    Args:
-        zonal_raster_list (list): List of paths to rasters to calculate zonal statistics for
-        mask_raster_path (pathlike): Path to raster to use as mask
-        mask_raster_value (int or float): Value to use as mask
-        zonal_vector_path (pathlike): Path to vector to calculate zonal statistics for
-        temp_workspace_path (pathlike): Path to temporary workspace
-        zonal_join_columns (list): List of zonal statistics to calculate
-        zonal_raster_labels (list): List of labels for zonal rasters
-
-    Returns:
-        tuple: Tuple of list of zonal statistics dataframes and path to aligned mask raster
-    """
-
-    if zonal_raster_labels is not None:
-        assert len(zonal_raster_labels) == len(zonal_raster_list), (
-            f"Length of zonal_raster_labels ({len(zonal_raster_labels)}) must match "
-            f"length of zonal_raster_list ({len(zonal_raster_list)})."
-        )
-
-    # Ensure path arguments are Path objects
-    mask_raster_path = Path(mask_raster_path)
-    zonal_vector_path = Path(zonal_vector_path)
-    temp_workspace_path = Path(temp_workspace_path)
-
-    zonal_stats_list = []
-    aligned_mask_raster_path = temp_workspace_path / f"{mask_raster_path.stem}.tif"
-    for i, raster in enumerate(zonal_raster_list):
-        raster = Path(raster)
-        if i == 0 and not aligned_mask_raster_path.exists():
-            logger.debug(f"Aligning mask with zonal raster {raster}")
-            raster_info = pygeoprocessing.get_raster_info(str(raster))
-            pygeoprocessing.align_and_resize_raster_stack(
-                [str(raster), str(mask_raster_path)],
-                [
-                    str(temp_workspace_path / f"{(raster).stem}.tif"),
-                    str(aligned_mask_raster_path),
-                ],
-                ["near", "near"],
-                raster_info["pixel_size"],
-                "intersection",
-                raster_align_index=0,
-            )
-        logger.debug(f"Zonal statistics {i+1} of {len(zonal_raster_list)} | {raster}")
-        zonal_stats_df = masked_zonal_stats(
-            raster,
-            aligned_mask_raster_path,
-            mask_raster_value,
-            zonal_vector_path,
-            temp_workspace_path,
-        )
-
-        zonal_stats_df = zonal_stats_df[zonal_join_columns]
-        # Rename columns to labels if provided, else raster name
-        if zonal_raster_labels is not None:
-            zonal_stats_df = zonal_stats_df.rename(
-                columns={
-                    col: f"{zonal_raster_labels[i]}_masked__{col}"
-                    for col in zonal_join_columns
-                }
-            )
-        else:
-            zonal_stats_df = zonal_stats_df.rename(
-                columns={
-                    col: f"{(raster).stem}_masked__{col}" for col in zonal_join_columns
-                }
-            )
-        zonal_stats_list.append(zonal_stats_df)
-
-    return zonal_stats_list, aligned_mask_raster_path
-
-
 def rename_invest_results(invest_model: str, invest_args: dict, suffix: str) -> None:
     """Rename InVEST results to include the suffix.
 
@@ -2034,3 +1735,126 @@ def grouped_scalar_calculation(
         gdal.GDT_Float32,
         base_raster_nodata,
     )
+
+
+def extract_admin_intersections(
+    study_area_path: Path, admin_boundaries_path: Path, admin_id_fields: dict
+) -> dict:
+    """Function that returns the names of admin boundaries that intersect the study area.
+
+    Parameters:
+        study_area_path (Path): pathlib Path to a shapefile of the study area.
+        admin_boundaries_path (Path): pathlib Path to a shapefile of the administrative boundaries.
+        admin_id_fields (dict): dict of field names that contains desired administrative identifiers.
+
+    Returns:
+        Dict of administrative identifiers for areas that intersected the study area.
+    """
+
+    # Read in study area and extract geometry
+    driver = ogr.GetDriverByName("ESRI Shapefile")
+    study_area = driver.Open(str(study_area_path), 0)
+    study_area_layer = study_area.GetLayer()
+    study_area_feat = study_area_layer.GetFeature(
+        0
+    )  # Assumes a single contiguous study area outline
+    study_area_geom = study_area_feat.GetGeometryRef()
+
+    # Read in admin boundaries
+    admin_boundaries = driver.Open(str(admin_boundaries_path), 0)
+    admin_layer = admin_boundaries.GetLayer()
+    admin_layer.SetSpatialFilter(study_area_geom)
+
+    # Output field admin field values
+    output_admin_values = {key: list() for key in admin_id_fields.keys()}
+    for feature in admin_layer:
+        for id_type, field in admin_id_fields.items():
+            output_admin_values[id_type].append(feature.GetField(field))
+
+    # Reset readings and close files
+    admin_layer.ResetReading()
+    study_area_layer.ResetReading()
+    admin_boundaries = None
+    study_area = None
+    study_area_feat = None
+    study_area_geom = None
+
+    return output_admin_values
+
+
+def extract_monthly_temperatures(temp_data_dir: Path, aoi_vector_path: Path, year=2017):
+    """Extract monthly average temperature data for a given year based on a pre-defined area of interest.
+
+    Parameters:
+        temp_data_dir (Path): Pathlib Path to a folder containing temperature data from SOURCE
+        aoi_vector_path (Path): Pathlib Path to the AOI vector file
+        year (int): the year in question, must be between 1900 and 2017
+
+    Returns:
+        A Series containing lon, lat, and average monthly temperature values.
+    """
+
+    # TODO Check on the source of the temperature data
+
+    # Test if input year is within the correct range
+    assert 1900 <= year <= 2017, f"Year {year} is not between 1900 and 2017"
+
+    def min_dimension(dataframe, column):
+        column_data = abs(dataframe[column] - dataframe[column].shift(1))
+        column_data = column_data.dropna()
+        distance = column_data[column_data != 0].min()
+        return distance
+
+    # Import gridded global average temperature data for a given year
+    temp_df = pd.read_csv(
+        temp_data_dir / f"air_temp.{year}",
+        delim_whitespace=True,
+        index_col=False,
+        header=None,
+        names=[
+            "lon",
+            "lat",
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+            "",
+        ],
+    ).iloc[:, :-1]
+    temp_gdf = gpd.GeoDataFrame(
+        temp_df, geometry=gpd.points_from_xy(temp_df["lon"], temp_df["lat"])
+    ).set_crs(epsg=4326)
+    aoi_gdf = gpd.read_file(aoi_vector_path).to_crs(temp_gdf.crs)
+    # Add dummy column to dissolve all geometries into one
+    aoi_gdf["dummy"] = "dummy"
+    aoi_geom = aoi_gdf.dissolve(by="dummy").geometry.iloc[0]
+    subset_gdf = temp_gdf[temp_gdf.within(aoi_geom)]
+
+    # If within calculation doesn't work, buffer AOI by half of the space between point locations until it does
+    buffer_dist = 0
+    buffer_add = min(min_dimension(temp_gdf, "lon"), min_dimension(temp_gdf, "lat")) / 4
+    while subset_gdf.empty:
+        buffer_dist += buffer_add
+        with warnings.catch_warnings():
+            # this will suppress all warnings in this block
+            warnings.simplefilter("ignore")
+
+            buffer_geom = (
+                aoi_gdf.dissolve(by="dummy").buffer(buffer_dist).geometry.iloc[0]
+            )
+            subset_gdf = temp_gdf[temp_gdf.within(buffer_geom)]
+
+    # Calculate average temperatures
+    temp_means = pd.DataFrame(
+        subset_gdf.drop(columns=["geometry"]).mean()[2:], columns=["temperature"]
+    )
+
+    return temp_means

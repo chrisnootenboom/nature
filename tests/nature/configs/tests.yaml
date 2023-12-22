@@ -1,0 +1,32 @@
+# Inputs
+
+# Misc
+nlud: /Users/cnootenboom/repos/nature/tests/nature/data/projected/nlud_simple.tif
+
+# Census population data
+template raster: /Users/cnootenboom/Documents/Data/Datasets/NLCD 2021/nlcd_2021_land_cover_l48_20230630.img
+census block dir 2020: /Volumes/Mimas/National Land Use Database/Data Sources/Census Blocks/2020
+state fips list:
+  - 48
+
+# Monthly Urban Cooling Model
+workspace_dir: /Users/cnootenboom/repos/nature/tests/nature/workspace
+results_suffix: test
+n_workers: -1
+lulc_raster_path: /Users/cnootenboom/repos/nature/tests/nature/data/projected/nlcd.tif
+ref_eto_raster_path: /Users/cnootenboom/repos/nature/tests/nature/data/projected/et0.tif
+aoi_vector_path: /Users/cnootenboom/repos/nature/tests/nature/data/projected/aoi.gpkg
+biophysical_table_path: /Users/cnootenboom/repos/nature/tests/nature/data/ucm_nlcd.csv
+green_area_cooling_distance: 150
+t_air_average_radius: 300
+uhi_max: 3.56
+building_vector_path: /Users/cnootenboom/repos/nature/tests/nature/data/projected/buildings.gpkg
+cc_method: factors
+cc_weight_shade: 0.6
+cc_weight_albedo: 0.2
+cc_weight_eti: 0.2
+air_temp_dir: /Users/cnootenboom/Documents/Projects/Urban Workflow/Data/air_temp_2017
+year: 2017
+city: San Antonio, TX
+building_energy_table_path: /Users/cnootenboom/repos/nature/tests/nature/data/building_energy_table_nlud.csv
+mortality_risk_path: /Users/cnootenboom/repos/nature/src/nature/data/guo_et_al_2014_mortality_risk.csv

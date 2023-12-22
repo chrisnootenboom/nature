@@ -20,7 +20,8 @@ import taskgraph
 
 from .. import nature
 from .. import rasterops
-from .model_metadata import NCI_METADATA
+from .. import zonal_statistics
+from ..model_metadata import NCI_METADATA
 
 LOGGER = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -1796,7 +1797,7 @@ def execute(args):
 
                     annual_yield_pickle_tasks[scenario_name] = task_graph.add_task(
                         task_name=f"annual_yield_pickle_zonal_stats_{scenario_name}",
-                        func=nature.batch_pickle_zonal_stats,
+                        func=zonal_statistics.batch_pickle_zonal_stats,
                         args=(
                             [
                                 scenario_variables["annual_yield_raster_path"][
@@ -1808,8 +1809,10 @@ def execute(args):
                             ],
                             ownership_vector_path,
                             [annual_yield_pickle_path, annual_yield_value_pickle_path],
-                            [["sum"], ["sum"]],
                         ),
+                        kwargs={
+                            "zonal_join_columns_list": [["sum"], ["sum"]],
+                        },
                         target_path_list=[
                             str(annual_yield_pickle_path),
                             str(annual_yield_value_pickle_path),
@@ -2339,7 +2342,7 @@ def execute(args):
                         scenario_name
                     ] = task_graph.add_task(
                         task_name=f"delta_annual_yield_pickle_zonal_stats_{scenario_name}",
-                        func=nature.batch_pickle_zonal_stats,
+                        func=zonal_statistics.batch_pickle_zonal_stats,
                         args=(
                             [
                                 scenario_variables["delta_annual_yield_raster_path"][
@@ -2362,13 +2365,15 @@ def execute(args):
                                 delta_annual_yield_value_private_pickle_path,
                                 delta_annual_yield_value_externality_pickle_tasks,
                             ],
-                            [
+                        ),
+                        kwargs={
+                            "zonal_join_columns_list": [
                                 ["sum"],
                                 ["sum"],
                                 ["sum"],
                                 ["sum"],
                             ],
-                        ),
+                        },
                         target_path_list=[
                             str(delta_annual_yield_pickle_path),
                             str(delta_annual_yield_value_pickle_path),
@@ -2401,7 +2406,7 @@ def execute(args):
 
         join_zonal_stats_task = task_graph.add_task(
             task_name=f"join_zonal_stats",
-            func=nature.join_batch_pickle_zonal_stats,
+            func=zonal_statistics.join_batch_pickle_zonal_stats,
             args=(
                 scenario_variables["annual_yield_pickle_paths"][BASELINE_SCENARIO_LABEL]
                 + [
@@ -2412,8 +2417,10 @@ def execute(args):
                     ][scenario_name]
                 ],
                 ownership_vector_path,
-                ownership_results_path,
             ),
+            kwargs={
+                "output_vector_path": ownership_results_path,
+            },
             dependent_task_list=[annual_yield_pickle_tasks[BASELINE_SCENARIO_LABEL]]
             + [
                 delta_annual_yield_pickle_tasks[scenario_name]
@@ -3034,7 +3041,7 @@ def _parse_scenario_variables(
         LOGGER.info("Checking that ownership parcel polygon has expected headers")
         ownership_vector = gdal.OpenEx(str(ownership_vector_path))
         ownership_layer = ownership_vector.GetLayer()
-        ownership_layer.GetGeomType() ###
+        ownership_layer.GetGeomType()  ###
         if ownership_layer.GetGeomType() not in [ogr.wkbPolygon, ogr.wkbMultiPolygon]:
             ownership_layer = None
             ownership_vector = None

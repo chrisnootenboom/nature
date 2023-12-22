@@ -1,16 +1,19 @@
 from pathlib import Path
 import logging
-import hashlib
-import inspect
+import tempfile
 from typing import List
 
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 
 from osgeo import gdal
 import pygeoprocessing
 
 import natcap.invest.utils
+
+from .. import nature
+from .. import zonal_statistics
 
 pathlike = str | Path
 
@@ -27,13 +30,31 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
+BUILDING_FILENAME = "building_energy_expenditures"
+
+CDD_FIELD = "cdd"
+HDD_FIELD = "hdd"
+CDD_KWH_FIELD = "cdd_kwh"
+HDD_KWH_FIELD = "hdd_kwh"
+CDD_COST_FIELD = "cdd_cost"
+HDD_COST_FIELD = "hdd_cost"
+
+BUILDING_TYPE_FIELD = "code"
+KWH_PER_CDD_FIELD = "kwh_per_cdd"
+KWH_PER_HDD_FIELD = "kwh_per_hdd"
+COST_FIELD = "cost"
+
 _EXPECTED_ENERGY_HEADERS = [
-    "lucode",
-    "building type",
-    "kwh_per_cdd",
-    "kwh_per_hdd",
-    "cost_per_kwh",
+    BUILDING_TYPE_FIELD,
+    KWH_PER_CDD_FIELD,
+    KWH_PER_HDD_FIELD,
+    COST_FIELD,
 ]
+
+MORTALITY_FILENAME = "mortality_risk"
+
+CITY_NAME_FIELD = "city"
+
 _EXPECTED_MORTALITY_HEADERS = [
     "city",
     "t_01",
@@ -49,55 +70,6 @@ _EXPECTED_MORTALITY_HEADERS = [
 ]
 
 
-class MultiplyRasterByScalarList(object):
-    """Calculate raster[idx] * scalar[idx] for each idx in the paired lists."""
-
-    def __init__(self, category_list, scalar_list, base_nodata, category_nodata):
-        """Create a closure for multiplying an array by a scalar.
-
-        Args:
-            scalar (float): value to use in `__call__` when multiplying by
-                its parameter.
-
-        Returns:
-            None.
-        """
-        self.category_list = category_list
-        self.scalar_list = scalar_list
-        self.base_nodata = base_nodata
-        self.category_nodata = category_nodata
-        # try to get the source code of __call__ so task graph will recompute
-        # if the function has changed
-        try:
-            self.__name__ = hashlib.sha1(
-                inspect.getsource(MultiplyRasterByScalarList.__call__).encode("utf-8")
-            ).hexdigest()
-        except IOError:
-            # default to the classname if it doesn't work
-            self.__name__ = MultiplyRasterByScalarList.__name__
-
-    def __call__(self, base_array, category_array):
-        result = np.empty_like(base_array)
-        result[:] = self.base_nodata
-
-        # Create valid mask
-        valid_mask = ~natcap.invest.utils.array_equals_nodata(
-            base_array, self.base_nodata
-        ) & ~natcap.invest.utils.array_equals_nodata(
-            category_array, self.category_nodata
-        )
-
-        # Multiply masked raster by category and associated scalar
-        for category, scalar in zip(self.category_list, self.scalar_list):
-            # Mask by category
-            current_mask = np.logical_and(valid_mask, (category_array == category))
-
-            base_array_masked = base_array[current_mask]
-            result[current_mask] = base_array_masked * scalar
-
-        return result
-
-
 def execute(args):
     """Urban Cooling Model valuation
 
@@ -105,12 +77,13 @@ def execute(args):
         args['workspace_dir'] (string): a path to the output workspace folder.
         args['results_suffix'] (string): string appended to each output file path.
         args['city'] (string): selected city.
-        args['lulc_tif'] (string): file path to a landcover raster.
+        args['lulc_raster_path'] (string): file path to a landcover raster.
         args['air_temp_tif'] (string): file path to an air temperature raster output from InVEST Urban Cooling Model.
-        args['dd_energy_path'] (string): file path to a table indicating the relationship between LULC classes and
+        args['building_vector_path'] (string): file path to a building vector dataset. Must include field(s):
+            * 'code': column linking this table to the building type associated with each polygon in the building_vector_path
+        args['building_energy_table_path'] (string): file path to a table indicating the relationship between building types and
             energy use. Table headers must include:
-                * 'lucode': column linking this table to the lulc_tif raster classes
-                * 'building type': the building type associated with each raster lucode
+                * 'code': column linking this table to the building type associated with each polygon in the building_vector_path
                 * 'kwh_per_cdd': the energy impact of each Cooling Degree Day for this building type
                 * 'kwh_per_hdd': the energy impact of each Heating Degree Day for this building type
                 * 'cost_per_hdd': the cost of energy associated with this building type
@@ -135,74 +108,70 @@ def execute(args):
 
     file_suffix = natcap.invest.utils.make_suffix_string(args, "results_suffix")
 
-    dd_energy_df = pd.read_csv(args["dd_energy_path"])
+    workspace_path = Path(args["workspace_dir"])
+
+    building_energy_df = pd.read_csv(args["building_energy_table_path"])
 
     # Test for correct csv headers
     for header in _EXPECTED_ENERGY_HEADERS:
-        if header not in dd_energy_df.columns:
+        if header not in building_energy_df.columns:
             raise ValueError(
                 f"Expected a header in biophysical table that matched the pattern '{header}' but was unable to find "
-                f"one. Here are all the headers from {args['dd_energy_path']}: {list(dd_energy_df.columns)}"
+                f"one. Here are all the headers from {args['building_energy_table_path']}: {list(building_energy_df.columns)}"
             )
 
     # TODO Consider calculating HDD/CDD using WBGT, not just raw temp, to account for the lived experience of heat
 
-    temp_dir = Path(args["workspace_dir"]) / "temp"
+    temp_dir = workspace_path / "temp"
     temp_dir.mkdir(exist_ok=True)
 
     # Calculate Heating Degree Days raster
     logger.debug(f"Calculating Heating Degree Days")
-    hdd_tif = Path(args["workspace_dir"]) / f"hdd{file_suffix}.tif"
+    hdd_tif = workspace_path / f"hdd{file_suffix}.tif"
     hdd_calculation(args["air_temp_tif"], hdd_tif)
-
-    # Calculate energy use raster (kWh) based on Heating Degree Days
-    hdd_kwh_tif = Path(args["workspace_dir"]) / f"hdd_kwh{file_suffix}.tif"
-    grouped_scalar_calculation(
-        hdd_tif,
-        args["lulc_tif"],
-        hdd_kwh_tif,
-        dd_energy_df["lucode"].to_list(),
-        dd_energy_df["kwh_per_hdd"].to_list(),
-        temp_dir,
-    )
-
-    # Calculate energy use raster ($) based on Heating Degree Days
-    hdd_cost_tif = Path(args["workspace_dir"]) / f"hdd_cost{file_suffix}.tif"
-    grouped_scalar_calculation(
-        hdd_kwh_tif,
-        args["lulc_tif"],
-        hdd_cost_tif,
-        dd_energy_df["lucode"].to_list(),
-        dd_energy_df["cost_per_kwh"].to_list(),
-        temp_dir,
-    )
 
     # Calculate Cooling Degree Days raster
     logger.debug(f"Calculating Cooling Degree Days")
-    cdd_tif = Path(args["workspace_dir"]) / f"cdd{file_suffix}.tif"
+    cdd_tif = workspace_path / f"cdd{file_suffix}.tif"
     cdd_calculation(args["air_temp_tif"], cdd_tif)
 
-    # Calculate energy use raster (kWh) based on Cooling Degree Days
-    cdd_kwh_tif = Path(args["workspace_dir"]) / f"cdd_kwh{file_suffix}.tif"
-    grouped_scalar_calculation(
-        cdd_tif,
-        args["lulc_tif"],
-        cdd_kwh_tif,
-        dd_energy_df["lucode"].to_list(),
-        dd_energy_df["kwh_per_cdd"].to_list(),
+    # Zonal statistics to connect Degree Days to Buildings
+    building_gdf = zonal_statistics.batch_zonal_stats(
+        [hdd_tif, cdd_tif],
+        args["building_vector_path"],
         temp_dir,
+        zonal_join_columns="mean",
+        zonal_raster_labels=[f"{HDD_FIELD}{file_suffix}", f"{CDD_FIELD}{file_suffix}"],
+        join_to_vector=True,
     )
 
-    # Calculate energy use raster ($) based on Cooling Degree Days
-    cdd_cost_tif = Path(args["workspace_dir"]) / f"cdd_cost{file_suffix}.tif"
-    grouped_scalar_calculation(
-        cdd_kwh_tif,
-        args["lulc_tif"],
-        cdd_cost_tif,
-        dd_energy_df["lucode"].to_list(),
-        dd_energy_df["cost_per_kwh"].to_list(),
-        temp_dir,
+    # TODO Calculate Energy Expenditures per building (REMOVE THE PICKLE STUFF bc we need to join it all to one df)
+    logger.debug(f"Calculating Energy Expenditures")
+    building_gdf = building_gdf.merge(
+        building_energy_df, on=BUILDING_TYPE_FIELD, how="left"
     )
+
+    # Calculating kWh per HDD/CDD
+    building_gdf[HDD_KWH_FIELD + file_suffix] = (
+        building_gdf[f"{HDD_FIELD}{file_suffix}__mean"]
+        * building_gdf[KWH_PER_HDD_FIELD]
+    )
+    building_gdf[CDD_KWH_FIELD + file_suffix] = (
+        building_gdf[f"{CDD_FIELD}{file_suffix}__mean"]
+        * building_gdf[KWH_PER_CDD_FIELD]
+    )
+
+    # Calculating cost per HDD/CDD
+    building_gdf[HDD_COST_FIELD + file_suffix] = (
+        building_gdf[HDD_KWH_FIELD + file_suffix] * building_gdf[COST_FIELD]
+    )
+    building_gdf[CDD_COST_FIELD + file_suffix] = (
+        building_gdf[CDD_KWH_FIELD + file_suffix] * building_gdf[COST_FIELD]
+    )
+
+    # Export building data
+    building_gpkg = workspace_path / f"{BUILDING_FILENAME}{file_suffix}.gpkg"
+    building_gdf.to_file(building_gpkg, driver="GPKG")
 
     # Calculate Mortality Risk
     logger.debug(f"Calculating Relative Mortality Risk")
@@ -222,7 +191,7 @@ def execute(args):
     # Test if selected city is in the Guo et al dataset
     city_name_global = f"{args['city'].split(',')[0]}, USA"
     try:
-        if city_name_global not in mortality_risk_df["city"]:
+        if city_name_global not in mortality_risk_df[CITY_NAME_FIELD]:
             raise IndexError("GuoStudy")
     except IndexError:
         logger.error(
@@ -233,7 +202,7 @@ def execute(args):
             mortality_risk_df["city"] == city_name_global
         ]
 
-        mortality_tif = Path(args["workspace_dir"]) / f"mortality_risk{file_suffix}.tif"
+        mortality_tif = workspace_path / f"{MORTALITY_FILENAME}{file_suffix}.tif"
         mortality_risk_calculation(
             args["air_temp_tif"], mortality_tif, city_mortality_risk_df
         )
@@ -429,65 +398,4 @@ def mortality_risk_calculation(
         str(target_mortality_path),
         gdal.GDT_Float32,
         TARGET_NODATA,
-    )
-
-
-def grouped_scalar_calculation(
-    base_raster_path: pathlike,
-    category_raster_path: pathlike,
-    target_raster_path: pathlike,
-    category_list: List[int],
-    scalar_list: List[int],
-) -> None:
-    """Raster calculator that multiplies some base raster by scalars associated with a
-    different raster's categories
-
-    Args:
-        base_raster_path (pathlike): Path to base raster to multiply
-        category_raster_path (pathlike): Path to raster with categories
-        target_raster_path (pathlike): Path to target raster
-        category_list (List[int]): List of categories in category raster
-        scalar_list (List[int]): List of scalars associated with categories
-
-    Returns:
-        None
-
-    """
-    # Ensure path variables are Path objects
-    base_raster_path = Path(base_raster_path)
-    category_raster_path = Path(category_raster_path)
-    target_raster_path = Path(target_raster_path)
-
-    temporary_working_dir = Path(tempfile.mkdtemp(dir=target_raster_path.parent))
-
-    base_raster_info = pygeoprocessing.get_raster_info(str(base_raster_path))
-    base_raster_nodata = base_raster_info["nodata"][0]
-    cell_size = np.min(np.abs(base_raster_info["pixel_size"]))
-
-    category_raster_nodata = pygeoprocessing.get_raster_info(str(category_raster_path))[
-        "nodata"
-    ][0]
-
-    # Calculate kWh map
-    grouped_scalar_op = MultiplyRasterByScalarList(
-        category_list, scalar_list, base_raster_nodata, category_raster_nodata
-    )
-
-    temp_base_path = temporary_working_dir / Path(base_raster_path).name
-    temp_category_path = temporary_working_dir / Path(category_raster_path).name
-
-    pygeoprocessing.align_and_resize_raster_stack(
-        [str(base_raster_path), str(category_raster_path)],
-        [str(temp_base_path), str(temp_category_path)],
-        ["near", "near"],
-        (cell_size, -cell_size),
-        "intersection",
-    )
-
-    pygeoprocessing.raster_calculator(
-        [(str(temp_base_path), 1), (str(temp_category_path), 1)],
-        grouped_scalar_op,
-        str(target_raster_path),
-        gdal.GDT_Float32,
-        base_raster_nodata,
     )

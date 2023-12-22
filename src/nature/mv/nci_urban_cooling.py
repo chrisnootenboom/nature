@@ -23,7 +23,7 @@ from natcap.invest.unit_registry import u
 
 from .. import nature
 from .. import rasterops
-from .model_metadata import NCI_METADATA
+from ..model_metadata import NCI_METADATA
 
 
 LOGGER = logging.getLogger(__name__)
