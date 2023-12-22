@@ -909,15 +909,18 @@ def convolve_2d_by_flat(
         flat_disk_kernel_raster(flat_kernel_path, terminal_distance)
     else:
         flat_square_kernel_raster(flat_kernel_path, terminal_distance)
-    pygeoprocessing.convolve_2d(
-        (str(signal_raster_path), 1),
-        (str(flat_kernel_path), 1),
-        str(target_convolve_raster_path),
-        working_dir=str(temporary_working_dir),
-        ignore_nodata_and_edges=ignore_nodata_and_edges,
-        mask_nodata=mask_nodata,
-        normalize_kernel=normalize,
-    )
+    with tempfile.TemporaryDirectory(
+        prefix="flat_kernel", dir=target_convolve_raster_path.parent
+    ) as temporary_working_dir:
+        pygeoprocessing.convolve_2d(
+            (str(signal_raster_path), 1),
+            (str(flat_kernel_path), 1),
+            str(target_convolve_raster_path),
+            working_dir=str(temporary_working_dir),
+            ignore_nodata_and_edges=ignore_nodata_and_edges,
+            mask_nodata=mask_nodata,
+            normalize_kernel=normalize,
+        )
     shutil.rmtree(flat_kernel_path)
 
 
