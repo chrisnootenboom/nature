@@ -33,8 +33,8 @@ import natcap.invest.utils
 import natcap.invest.spec_utils
 import natcap.invest.validation
 
-from . import functions
-from . import rasterops
+# from . import functions
+# from . import rasterops
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()

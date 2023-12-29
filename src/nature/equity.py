@@ -20,6 +20,7 @@ import pygeoprocessing
 import pygeoprocessing.kernels
 
 from . import nature
+from . import functions
 
 logger = logging.getLogger(__name__)
 handler = logging.StreamHandler()
@@ -653,3 +654,144 @@ def extract_and_process_acs_data(
                 # )
 
     return (acs_gpkg, acs_dir)
+
+
+def equity_covariance(df, equity_columns, es_column, equity_label, es_label):
+    """Calculate the covariance between equity variables and ecosystem services.
+
+    Args:
+        df (pd.DataFrame): DataFrame of equity variables and ecosystem services.
+        equity_columns (List[str]): List of equity variable columns.
+        es_column (str): Ecosystem service column.
+
+    Returns:
+        df (pd.DataFrame): DataFrame of equity variables and ecosystem services with covariance values.
+        equity_score (float): Equity score.
+    """
+
+    # Calculate total sum of population in each equity group
+    total_column = f"{equity_label}_POPULATION_TOTAL"
+    df[total_column] = df[equity_columns].sum(axis=1)
+
+    # Calculate the average number of people per equity group in each tract
+    average_equity_column = f"{equity_label}_POPULATION_GROUP_AVG"
+    df[average_equity_column] = df[equity_columns].mean(axis=1)
+
+    # Calculate the total average experience of ecosystem service
+    total_average_es = functions.grouped_weighted_avg(df[es_column], df[total_column])
+    print(total_average_es)
+
+    # Calculate covariance between equity variables and ecosystem services per tract
+    for equity_column in equity_columns:
+        covariance_column = f"{es_label}_{equity_column}_COV"
+        df[covariance_column] = (
+            (df[es_column] - total_average_es) / total_average_es
+        ) * (
+            (df[equity_column] - df[average_equity_column]) / df[average_equity_column]
+        )
+
+    # Calculate the total covariance by weighted average of covariance and population
+    covariance_sum = 0
+    total_sum = df[total_column].sum()
+    for equity_column in equity_columns:
+        covariance_column = f"{es_label}_{equity_column}_COV"
+
+        # Ensure covariance column is in dataframe
+        assert covariance_column in df.columns
+
+        # Remove null values
+        sub_df = df[[covariance_column, equity_column]].dropna()
+
+        # SUMPRODUCT() function from excel, equivalent to dot product for 1D arrays
+        sumproduct = sub_df[covariance_column].dot(sub_df[equity_column])
+        covariance_sum += sumproduct
+
+    # Calculate equity score
+    equity_score = covariance_sum / total_sum
+
+    return df, equity_score
+
+
+def area_equity_assessment(
+    census_table_labels: List[str],
+    census_table_path_list: List[pathlike],
+    es_vector_path: pathlike,
+    es_field_labels: List[str],
+    es_fields: List[str],
+    census_join_field: str,
+    workspace_path: pathlike,
+    census_ignore_fields: List[str] = ["GEO_ID", "state", "county", "tract"],
+):
+    """Calculate the covariance between equity variables and ecosystem services.
+
+    Args:
+        census_table_labels (List[str]): List of census table labels.
+        census_table_path_list (List[pathlike]): List of census table paths.
+        es_vector_path (pathlike): Path to ecosystem service vector.
+        es_field_labels (List[str]): List of ecosystem service field labels.
+        es_fields (List[str]): List of ecosystem service fields.
+        census_join_field (str): Census join field.
+
+    Returns:
+    """
+
+    EQUITY_COLUMN_NAME = "equity_measure"
+
+    # Ensure workspace path is a Path object
+    workspace_path = Path(workspace_path)
+
+    # Create empty equity score dataframe
+    equity_score_df = pd.DataFrame(columns=[EQUITY_COLUMN_NAME] + es_field_labels)
+
+    # Read in ecosystem service vector
+    es_gdf = gpd.read_file(es_vector_path)
+    es_gdf.drop("geometry", axis=1, inplace=True)
+
+    # Iterate through equity measures
+    for census_table_label, census_table_path in zip(
+        census_table_labels, census_table_path_list
+    ):
+        # Read in census table
+        census_table_df = pd.read_csv(census_table_path)
+
+        # Merge census table with ecosystem service vector
+        merged_df = pd.merge(
+            census_table_df,
+            es_gdf,
+            left_on=census_join_field,
+            right_on=census_join_field,
+        )
+
+        # Iterate through ecosystem services
+        row_dict = {EQUITY_COLUMN_NAME: census_table_label}
+        for es_field, es_field_label in zip(es_fields, es_field_labels):
+            # Calculate covariance between equity variables and ecosystem services
+            merged_df, equity_score = equity_covariance(
+                merged_df,
+                [
+                    col
+                    for col in census_table_df.columns
+                    if col not in census_ignore_fields
+                ],
+                es_field,
+                census_table_label,
+                es_field_label,
+            )
+            row_dict[es_field_label] = equity_score
+
+        # Output census-level equity scores as csv
+        merged_df.to_csv(
+            workspace_path / f"{census_table_label}_equity_scores.csv",
+            index=False,
+        )
+
+        # Append equity scores to dataframe
+        equity_score_df = pd.concat(
+            [equity_score_df, pd.DataFrame(row_dict, index=[0])], ignore_index=True
+        )
+
+    # Output equity scores as csv
+    equity_score_df.to_csv(
+        workspace_path / "equity_scores.csv",
+        index=False,
+    )

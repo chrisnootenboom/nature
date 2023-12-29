@@ -30,3 +30,18 @@ year: 2017
 city: San Antonio, TX
 building_energy_table_path: /Users/cnootenboom/repos/nature/tests/nature/data/building_energy_table_nlud.csv
 mortality_risk_path: /Users/cnootenboom/repos/nature/src/nature/data/guo_et_al_2014_mortality_risk.csv
+
+# San Antonio equity indices
+census_table_labels:
+  - poverty
+  - race
+census_table_path_list:
+  - /Users/cnootenboom/Documents/Projects/NASA/acs_tract_poverty.csv
+  - /Users/cnootenboom/Documents/Projects/NASA/acs_tract_race.csv
+es_vector_path: /Users/cnootenboom/Documents/Projects/NASA/invest/ucm/uhi_results_baseline.shp
+es_field_labels:
+  - temperature
+es_fields:
+  - avg_tmp_v
+census_join_field: GEO_ID
+workspace_path: /Users/cnootenboom/Documents/Projects/NASA/equity

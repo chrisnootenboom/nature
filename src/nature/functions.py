@@ -117,6 +117,3 @@ def grouped_weighted_avg(
         ).sum() / weights.fillna(0).groupby(by).sum()
     else:
         return (values.fillna(0) * weights.fillna(0)).sum() / weights.fillna(0).sum()
-
-
-# def equity_covariance():

@@ -4,8 +4,8 @@
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
 # Testing data and outputs
-/tests/nature/data/*
-/tests/nature/workspace/*
+/tests/data/*
+/tests/workspace/*
 
 # Mac stuff
 .DS_Store
